@@ -439,10 +439,20 @@ function createDailyGoals({
     return 0;
   }
 
-  function progressFor(definition, characterID, state, nowMs) {
+  function rawProgressFor(definition, characterID, state, nowMs) {
     const measured = measuredProgress(definition, characterID, state, nowMs);
     const manual = int(state.manual[definition.goalID]);
     return Math.max(0, Math.min(MAX_TARGET, measured + manual));
+  }
+
+  function progressFor(definition, characterID, state, nowMs) {
+    // Clamped to THIS goal's target, never to a shared ceiling. Measured 2026-10-31 in the
+    // pinned client (dailygoals/client/goal.pyj): "completed" is
+    // `current_progress == target` - exact equality. A goal that overshot (mining 6000 of
+    // 5000) therefore never showed its claim button although the server would have paid.
+    // A full bar is also what the card draws. The reward still follows the raw progress, so
+    // a richer day is still worth more SP.
+    return Math.min(definition.target, rawProgressFor(definition, characterID, state, nowMs));
   }
 
   function snapshotFor(characterID, nowMs = clock()) {
@@ -453,15 +463,17 @@ function createDailyGoals({
     return {
       status: "OBSERVED",
       goals: DEFINITIONS.map((definition) => {
-        // The wire carries an integer, so round once and let the reward follow the
-        // same number: the card the client shows always equals what redeem pays.
-        const progress = Math.round(progressFor(definition, id, state, nowMs));
+        // The wire carries an integer, and the client's own "completed" test is exact
+        // equality with the target, so progress is clamped; the reward follows the raw
+        // measurement so a bigger haul is still worth more SP.
+        const rawProgress = Math.round(rawProgressFor(definition, id, state, nowMs));
+        const progress = Math.min(definition.target, rawProgress);
         const claimedAt = int(state.claims[definition.goalID]);
         return {
           definition,
           progress,
           target: definition.target,
-          rewardSkillPoints: rewardSkillPoints(definition, progress),
+          rewardSkillPoints: rewardSkillPoints(definition, rawProgress),
           completed: progress >= definition.target,
           claimedAt,
           claimable: progress >= definition.target && claimedAt === 0,
@@ -519,7 +531,11 @@ function createDailyGoals({
     if (progress < definition.target) {
       return { status: "NOT_COMPLETED", progress, target: definition.target };
     }
-    const skillPoints = rewardSkillPoints(definition, progress);
+    // The card promised the reward computed from the raw measurement, so redeem pays that.
+    const skillPoints = rewardSkillPoints(
+      definition,
+      Math.round(rawProgressFor(definition, id, state, nowMs)),
+    );
     // Claim first, pay second: a paid goal that was not recorded could be paid
     // twice, a recorded goal that was not paid is recoverable.
     state.claims[goalID] = nowMs;

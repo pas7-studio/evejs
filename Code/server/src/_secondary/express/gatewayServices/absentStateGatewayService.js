@@ -209,7 +209,12 @@ function createAbsentStateGatewayService() {
       }
 
       if (requestTypeName === "eve_public.payment.schedule.api.GetRequest") {
-        return emptyAnswer(NOT_FOUND, "no payment schedules exist in this world",
+        // Measured in the owner's own log (2026-10-31 15:01:43): a 404 here is raised in the
+        // client as an UNCAUGHT RequestException in a background tasklet, in the same second the
+        // daily-goal page loads - and the daily-goal payment subsystem is what then refuses the
+        // claim. The response carries one optional schedule, so the honest "no such schedule" is
+        // a 200 with the field unset, which the client can read; a 404 it cannot.
+        return emptyAnswer(200, "",
           "eve_public.payment.schedule.api.GetResponse");
       }
 
