@@ -1289,8 +1289,10 @@ function warMobilizerInstance(registry,guard){
   isTactical:id=>tacticsDirector?.activeIDs()?.has(id)===true,
   // Command size comes from real rank. No pilot has earned merit yet, so every
   // side starts at a recruit's single ship instead of the old blanket two.
-  commandCap:({assignedPilotIDs})=>require("./coopFactionWarMerit")
-   .sideCommandCap({pilotIDs:assignedPilotIDs,records:warMeritRecords()})
+  // FW-129: the mobiliser obeys the same squadron floor as the garrison, so adopting
+  // existing patrols can never shrink a front back to a single hull.
+  commandCap:({assignedPilotIDs})=>Math.max(3,require("./coopFactionWarMerit")
+   .sideCommandCap({pilotIDs:assignedPilotIDs,records:warMeritRecords()}))
  });
  return warMobilizer;
 }
@@ -1749,8 +1751,15 @@ function advanceNativeWarGarrison(){
    try{
     // records() already answers the per-pilot map, not the whole ledger state.
     const row=warMeritRecords()?.[String(pilotID)];
-    return Number(row&&row.merit)||0;
-   }catch(_error){return 0}
+    // FW-129 (measured 2026-10-31): every fresh side mustered at merit 0, which the
+    // composition reads as a recruit's SINGLE frigate - two lone frigates per front,
+    // so a whole war was one hull against one hull and a kill took an hour. The earned
+    // rank still raises the gang (25/70/150/300/600/1200 merit), but a side now starts
+    // as a real squadron instead of a duel.
+    const floor=Number(process.env.EVEJS_COOP_WAR_MIN_MERIT||70);
+    return Math.max(Number.isFinite(floor)&&floor>=0?floor:70,
+     Number(row&&row.merit)||0);
+   }catch(_error){return 70}
   },
   // N5: a replacement hull must be paid for by the campaign chest, which only
   // ever holds ISK a real market fill paid to an NPC pilot (FW-005B). An unfunded
@@ -1861,7 +1870,11 @@ function advanceNativeWarCombat(){
     setBehaviorOverrides:(id,overrides)=>
      require("./npc/npcService").setBehaviorOverrides(id,overrides),
     // FW-118: each role keeps its own engagement range instead of one 500 m ball.
-    roleOfEntity:warHullRole
+    roleOfEntity:warHullRole,
+    // FW-129: two orders per tick with a two-minute re-order meant at most two hulls of a
+    // ten-hull front were ever shooting. Three per tick every 45 s lets a squadron engage
+    // and keep engaging, which is the difference between a duel and a battle.
+    maxOrders:3,cooldownMs:45000
    });
   const posture=warPosture.tick();
   if(posture.applied.length)require("./coopRuntimeProbe").observe(
