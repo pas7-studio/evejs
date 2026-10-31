@@ -429,6 +429,116 @@ function distributionRunAuthorities(options = {}) {
       // (`refined 17471 -> 1 mineral`), so Pyerite and Mexallon exist only at a station that
       // really sells them; a hull standing there with an empty hold is the ship that carries
       // them home, where they stow into the factory hangar.
+      // A blueprint is capital, not a whim: buy the one whose product really pays for its
+      // materials at the station that sells it, and carry it home where the materials are.
+      // Measured 2026-10-31: the factory owned only loss-making styles, while Jita sold the
+      // Reinforced Bulkheads I blueprint (1334) for 175 000 and its 6 944 Tritanium per unit
+      // has no bid anywhere in The Forge - free ore, 242 units of real demand.
+      blueprintPlan: ({haulerID}) => {
+        try {
+          if (String(env.EVEJS_COOP_BLUEPRINT_SHOP_TRIP || "0") !== "1")
+            return {status: "BLUEPRINT_TRIP_DISABLED"};
+          const home = factoryStation();
+          if (!home) return {status: "NO_FACTORY_STATION"};
+          const native = store.getNativeEntity(haulerID);
+          const here = Number(native && native.systemID) || 0;
+          if (!here) return {status: "HULL_UNKNOWN"};
+          const db2 = openDb();
+          if (!db2) return {status: "BOOK_UNAVAILABLE"};
+          const manufacture2 = require("./coopNpcManufacture");
+          const inventory2 = require("../services/inventory/itemTypeRegistry");
+          const homeStation = worldData.getStationByID(home);
+          const homeSystemID = Number(homeStation && homeStation.solarSystemID) || 0;
+          const systems = [here];
+          try {
+            const scene = sceneFor(here);
+            for (const entity of (scene && Array.isArray(scene.staticEntities)
+              ? scene.staticEntities : [])) {
+              if (String(entity.kind) !== "stargate") continue;
+              const gate = worldData.getStargateByID(entity.itemID);
+              const destination = Number(gate && gate.destinationSolarSystemID) || 0;
+              if (destination && !systems.includes(destination)) systems.push(destination);
+            }
+          } catch (_error) { /* the hull system alone is still a real answer */ }
+          if (homeSystemID && !systems.includes(homeSystemID)) systems.push(homeSystemID);
+          const cap = Number(env.EVEJS_COOP_BLUEPRINT_PRICE_CAP || 500000);
+          const asks = db2.prepare("select station_id, solar_system_id, type_id, price from seed_stock " +
+            "where solar_system_id in (" + systems.map(() => "?").join(",") + ") " +
+            "and quantity>0 and price>0 and price<=?").all(...systems, cap);
+          const demandSystems = [...new Set([homeSystemID, ...systems].filter(Boolean))];
+          const demand = new Map();
+          for (const row of db2.prepare("select type_id, sum(quantity) as volume, max(price) as price " +
+            "from seed_buy_orders where quantity>0 and solar_system_id in (" +
+            demandSystems.map(() => "?").join(",") + ") group by type_id")
+            .all(...demandSystems)) {
+            demand.set(Number(row.type_id),
+              {volume: Number(row.volume) || 0, price: Number(row.price) || 0});
+          }
+          // Blueprints the corporation already holds are not a purchase.
+          const owner = Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129);
+          const ownedRows = items.listOwnedItems(owner, {locationID: undefined});
+          const ownedList = Array.isArray(ownedRows) ? ownedRows
+            : (ownedRows && ownedRows.data) || [];
+          const owned = new Set(ownedList.filter((row) => Number(row.quantity) === -1)
+            .map((row) => Number(row.typeID)).filter(Boolean));
+          const held = (typeID) => ownedList
+            .filter((row) => Number(row.typeID) === Number(typeID) &&
+              Number(row.locationID) === Number(home))
+            .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+          let best = null;
+          for (const ask of asks) {
+            const typeID = Number(ask.type_id);
+            if (owned.has(typeID)) continue;
+            const meta = inventory2.resolveItemByTypeID(typeID) || {};
+            if (Number(meta.categoryID) !== 9) continue;
+            const plan = blueprintRecipe(manufacture2, typeID);
+            if (!plan || plan.status !== "READY") continue;
+            const bid = demand.get(Number(plan.productTypeID));
+            if (!bid || !(bid.price > 0) || !(bid.volume > 0)) continue;
+            let unitCost = 0;
+            let runs = Infinity;
+            for (const material of plan.materials || []) {
+              const quote = demand.get(Number(material.typeID));
+              unitCost += Number(material.quantity) * Number((quote && quote.price) || 0);
+              runs = Math.min(runs, Math.floor(held(material.typeID) /
+                Math.max(1, Number(material.quantity))));
+            }
+            if (!Number.isFinite(runs)) continue;
+            const buildable = Math.max(0, Math.min(runs, bid.volume));
+            if (buildable < 1) continue;
+            const profit = (bid.price - unitCost) * buildable *
+              Math.max(1, Number(plan.productPerRun) || 1) - Number(ask.price);
+            if (!(profit > 0)) continue;
+            if (!best || profit > best.profit)
+              best = {profit, typeID, stationID: Number(ask.station_id),
+                systemID: Number(ask.solar_system_id) || here,
+                price: Number(ask.price), buildable};
+          }
+          if (!best) return {status: "NO_BLUEPRINT_WORTH_BUYING"};
+          if (Number(best.stationID) === Number(home)) return {status: "BUY_AT_HOME"};
+          let gate = null;
+          if (Number(best.systemID) !== here) {
+            const pair = require("./coopNpcGateTravel").connectedGates({
+              sourceSystemID: here, targetSystemID: Number(best.systemID),
+              sourceScene: sceneFor(here), getGate: (id) => worldData.getStargateByID(id)});
+            if (!pair || !pair[0]) return {status: "NO_RECIPROCAL_GATE",
+              toSystemID: Number(best.systemID)};
+            gate = {sourceGateID: pair[0].sourceGateID,
+              destinationGateID: pair[0].destinationGateID,
+              sourceSystemID: here, destinationSystemID: Number(best.systemID)};
+          }
+          return {status: "OK", trip: {mode: "blueprint", blueprintTypeID: best.typeID,
+            typeID: best.typeID, quantity: 0, expectedIsk: 0, price: best.price,
+            profit: Math.round(best.profit), buildable: best.buildable,
+            fromStationID: best.stationID, fromSystemID: best.systemID,
+            toStationID: best.stationID, toSystemID: best.systemID,
+            homeStationID: Number(home), homeSystemID, gate,
+            items: [{stationID: best.stationID, typeID: best.typeID, quantity: 0}]}};
+        } catch (error) {
+          return {status: "BLUEPRINT_PLAN_THREW",
+            reason: String((error && error.message) || error).slice(0, 80)};
+        }
+      },
       buyInputs: async ({haulerID, stationID, systemID}) => {
         try {
           const home = factoryStation();

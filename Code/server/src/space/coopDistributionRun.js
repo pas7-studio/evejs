@@ -172,6 +172,9 @@ function note(observe, event, state, extra = {}) {
   } catch (_error) { /* telemetry only */ }
 }
 
+// Trips that carry nothing out and bring something back: they load no freight, do not sell at
+// the far station, and are not finished until the hold reaches the factory.
+const SHOPPING_MODES = new Set(["import", "blueprint"]);
 // How often the same order may be re-issued while a hull flies to a station.
 const ORDER_SPACING_MS = 45000;
 // A stop that stays unloaded this long is a stall, not patience (beats, not seconds).
@@ -214,7 +217,19 @@ async function tick(haulerID, authorities = {}, env = process.env) {
         importing = typeof authorities.importPlan === "function"
           ? await authorities.importPlan({haulerID: id}) : null;
       } catch (_error) { importing = {status: "IMPORT_PLAN_THREW"}; }
-      const row = importing && importing.status === "OK" ? importing.trip : null;
+      let row = importing && importing.status === "OK" ? importing.trip : null;
+      // Nothing missing is the moment to buy CAPITAL: a blueprint whose product pays for its
+      // own materials, at the station that sells it, carried home where the materials are.
+      if (!row && typeof authorities.blueprintPlan === "function") {
+        let capital = null;
+        try { capital = authorities.blueprintPlan({haulerID: id}); }
+        catch (_error) { capital = null; }
+        row = capital && capital.status === "OK" ? capital.trip : null;
+        if (capital && capital.status === "OK")
+          note(observe, "living-distribution-blueprint-trip", { haulerID: id },
+            { reason: "PROFIT:" + num(capital.trip.profit) + " BUILDABLE:" +
+              num(capital.trip.buildable) });
+      }
       if (!row) return null;
       const seller = pos(row.toStationID);
       const sellerSystem = pos(row.toSystemID);
@@ -238,7 +253,8 @@ async function tick(haulerID, authorities = {}, env = process.env) {
         }
       }
       const importState = write({version: 1, haulerID: id, phase: importPhase, trip: row,
-        mode: "import", importTypes: [pos(row.typeID)].filter(Boolean),
+        mode: String(row.mode || "import"),
+        importTypes: [pos(row.typeID)].filter(Boolean),
         homeStationID: pos(row.homeStationID), homeSystemID: pos(row.homeSystemID),
         cycles: num(state && state.cycles), trips: 0,
         stops: [{stationID: seller, items: []}], stopIndex: 0, loadedStops: [],
@@ -501,6 +517,25 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   }
   // Import phase: buy what the factory lacks at the station that really sells it, bounded, then
   // go home where the hold stows into the hangar and the manufacturer can finally run.
+  if (String(state.phase) === PHASE.SUPPLY && String(state.mode) === "blueprint" &&
+    typeof authorities.buyBlueprint === "function") {
+    let answer = null;
+    try {
+      answer = await authorities.buyBlueprint({ haulerID: id, stationID: pos(state.toStationID),
+        systemID: pos(state.toSystemID) });
+    } catch (_error) { answer = null; }
+    const bought = answer && answer.bought ? String(answer.bought.status) : "";
+    const settled = bought === "TRADE_SETTLED";
+    const reason = settled ? "BLUEPRINT_BOUGHT:" + pos(state.typeID)
+      : "BLUEPRINT_BUY_FAILED:" + String(bought || (answer && answer.status) || "NO_ANSWER").slice(0, 40);
+    const home = write({ ...state, phase: PHASE.RETURN, supplyTries: 0, updatedAt: now,
+      importBought: settled ? Math.max(1, num(state.importBought)) : num(state.importBought),
+      lastReason: reason, crossAt: 0, stopWaits: 0,
+      returnToSystemID: pos(state.homeSystemID) || pos(state.fromSystemID),
+      returnStationID: pos(state.homeStationID) || pos(state.fromStationID) }, env);
+    note(observe, "living-distribution-run", home, { reason });
+    return { status: "RETURN", reason, state: home };
+  }
   if (String(state.phase) === PHASE.SUPPLY && typeof authorities.buyInputs === "function") {
     let answer = null;
     try {
@@ -573,7 +608,7 @@ async function tick(haulerID, authorities = {}, env = process.env) {
 
   if (step.action === "LIFT") {
     // A shopping trip loads nothing: the hold leaves empty and comes home with inputs.
-    if (String(state.mode) === "import") {
+    if (SHOPPING_MODES.has(String(state.mode))) {
       if (!state.gate) return finish(PHASE.TO_DEST, "IMPORT_FLYING");
       let crossing = null;
       try {
@@ -711,7 +746,7 @@ async function tick(haulerID, authorities = {}, env = process.env) {
 
   if (step.action === "SELL") {
     // A shopping trip is AT the seller's station: buy, never sell.
-    if (String(state.mode) === "import")
+    if (SHOPPING_MODES.has(String(state.mode)))
       return finish(PHASE.SUPPLY, "IMPORT_READY", {sellCalls: 0, supplyTries: 0});
     // The empty hold is proof enough and needs no market at all, so it is asked FIRST.
     const held = typeof authorities.cargoUnits === "function" ? authorities.cargoUnits(id) : null;
@@ -881,7 +916,7 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     // A shopping trip is not finished when it merely reaches the home SYSTEM: the material
     // has to be in the hangar, or the factory keeps answering MATERIALS_MISSING while the
     // minerals sit in a hold. Fly the last in-system leg and unload what this trip bought.
-    if (String(state.mode) === "import" && pos(state.returnStationID)) {
+    if (SHOPPING_MODES.has(String(state.mode)) && pos(state.returnStationID)) {
       const gap = typeof authorities.distanceTo === "function"
         ? authorities.distanceTo(pos(state.returnStationID), pos(state.returnToSystemID), id)
         : null;
