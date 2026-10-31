@@ -401,6 +401,29 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     note(observe, "living-distribution-run", again, { reason: again.lastReason });
     return { status: "RETRYING", state: again };
   }
+  // A hold is not a warehouse. Whenever this hull is physically at the corporation's own
+  // loading station, what only belongs on a shelf (a blueprint bought in space) goes on the
+  // shelf - independently of what the run is doing, because a run with no profitable trip
+  // never reaches a LIFT step and would leave the asset in the hold for ever.
+  if (typeof authorities.stow === "function" && pos(state.fromStationID)) {
+    let near = null;
+    try {
+      near = typeof authorities.distanceTo === "function"
+        ? authorities.distanceTo(pos(state.fromStationID), pos(state.fromSystemID), id) : null;
+    } catch (_error) { near = null; }
+    if (Number.isFinite(near) && near <= STATION_RANGE_M) {
+      let stored = null;
+      try { stored = authorities.stow({ haulerID: id, stationID: pos(state.fromStationID) }); }
+      catch (_error) { stored = null; }
+      if (stored && stored.status === "STOWED") {
+        const moved = (stored.stowed || []).filter((row) => row.status === "STOWED");
+        const now2 = write({ ...state, updatedAt: now,
+          lastReason: "STOWED:" + moved.map((row) => row.typeID).join(",") }, env);
+        note(observe, "living-distribution-run", now2, { reason: now2.lastReason });
+        state = now2;
+      }
+    }
+  }
   const step = decide(state, facts);
   const finish = (phase, reason, extra = {}) => {
     const stamp = phase === PHASE.BLOCKED ? { blockedAt: now } : {};
@@ -447,6 +470,19 @@ async function tick(haulerID, authorities = {}, env = process.env) {
 
   if (step.action === "LIFT") {
     if (typeof authorities.lift !== "function") return { status: "NO_LIFT" };
+    // A hold is not a warehouse. Anything the corporation bought in space (the measured case:
+    // the Miner I Blueprint bought for 92 720 ISK on 2026-10-31) has to reach the hangar before
+    // it can be built from, so every loading stop first stows what only belongs on a shelf.
+    if (typeof authorities.stow === "function") {
+      let stored = null;
+      try { stored = authorities.stow({ haulerID: id, stationID: stop.stationID }); }
+      catch (_error) { stored = null; }
+      if (stored && stored.status === "STOWED") {
+        const moved = (stored.stowed || []).filter((row) => row.status === "STOWED");
+        note(observe, "living-distribution-run", state,
+          { reason: "STOWED:" + moved.map((row) => row.typeID).join(",") });
+      }
+    }
     // Buy a blueprint where the hull LOADS: that is the station the corporation keeps its
     // materials at, so a new blueprint can be built at once instead of needing a second haul.
     if (!state.blueprintTried && typeof authorities.buyBlueprint === "function") {

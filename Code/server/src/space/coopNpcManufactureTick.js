@@ -258,6 +258,19 @@ async function runOnce(options = {}) {
       stationID: pos(job.stationID) || (options.stationID || 0), jobID: String(job.jobID || ""),
       productTypeID: pos(job.productTypeID), quantity: num(job.quantity)});
 
+  // A blueprint the corporation physically holds IS an asset: the durable receipts are only
+  // its record, and nothing but the manual seeding step ever wrote one, so a PURCHASED
+  // blueprint could never be built (measured 2026-10-31: Miner I Blueprint bought for
+  // 92 720 ISK, manufacturer answering NO_BLUEPRINT). Adopt what the hangar proves first.
+  let adopted = [];
+  try {
+    adopted = (manufacture.adoptHeldBlueprints({ownerID, items, now}) || {}).adopted || [];
+  } catch (_error) { adopted = []; }
+  for (const row of adopted)
+    note(options, "living-npc-blueprint-adopted", {systemID: options.systemID,
+      stationID: pos(row.stationID), typeID: pos(row.blueprintTypeID),
+      status: "ADOPTED", reason: String(row.blueprintName || "").slice(0, 60)});
+
   const blueprints = seededBlueprints({root, ownerID});
   if (!blueprints.length) {
     note(options, "living-npc-manufacture-skipped", {systemID: options.systemID,

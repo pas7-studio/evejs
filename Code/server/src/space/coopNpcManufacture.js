@@ -100,6 +100,62 @@ function ownedAt(ownerID, stationID, typeID) {
     quantity: matching.reduce((sum, row) => sum + size(row), 0) };
 }
 
+// Adopt the blueprints the corporation PHYSICALLY holds.
+//
+// Measured 2026-10-31: the trader bought the Miner I Blueprint for 92 720 ISK, the trade
+// settled, and the manufacturer still answered NO_BLUEPRINT for hours. The hangar row is the
+// asset and the receipt is only its record, but the ONLY writer of receipts was `seedBlueprint`
+// - a manual seeding step - so a PURCHASED blueprint could never be built, and the whole
+// "acquire a blueprint, then produce" half of the economy was dead by construction.
+//
+// Adoption invents nothing: it reads the real hangar rows of the real owner and records one
+// receipt per (station, blueprint) that has none. It never grants an item and never touches a
+// row it did not find.
+const BLUEPRINT_CATEGORY_ID = 9;
+function adoptHeldBlueprints({ownerID, items = null, now = Date.now(), systemID = 0,
+  root: overrideRoot = null} = {}) {
+  const owner = pos(ownerID);
+  if (!owner) return {status: "INVALID_ARGUMENT", adopted: []};
+  const inventory = items || require("../services/inventory/itemStore");
+  let rows = [];
+  try {
+    const answer = inventory.listOwnedItems(owner, {locationID: undefined});
+    rows = Array.isArray(answer) ? answer : (Array.isArray(answer && answer.data) ? answer.data : []);
+  } catch (_error) { return {status: "HANGAR_UNREADABLE", adopted: []}; }
+  const seen = new Map();
+  for (const row of rows) {
+    if (Number(row && row.categoryID) !== BLUEPRINT_CATEGORY_ID) continue;
+    const stationID = pos(row.locationID);
+    const typeID = pos(row.typeID);
+    if (!stationID || !typeID) continue;
+    const quantity = num(row.quantity);
+    const size = quantity > 0 ? quantity : (Number(row.singleton) === 1 ? 1 : 0);
+    if (size < 1) continue;
+    const key = stationID + ":" + typeID;
+    if (!seen.has(key)) seen.set(key, {stationID, typeID, itemID: pos(row.itemID), size});
+  }
+  const dir = path.join(overrideRoot || root(), "blueprints");
+  const adopted = [];
+  for (const row of seen.values()) {
+    const receiptID = "seed:" + owner + ":" + row.stationID + ":" + row.typeID;
+    const file = path.join(dir, receiptID.replace(/:/g, "_") + ".json");
+    let prior = null;
+    try { prior = JSON.parse(fs.readFileSync(file, "utf8")); } catch (_error) { prior = null; }
+    if (prior && String(prior.status) === "SEEDED" && pos(prior.ownerID) === owner) continue;
+    const plan = (() => { try { return recipe(row.typeID, 1); } catch (_error) { return null; } })();
+    const receipt = {version: 1, status: "SEEDED", ownerID: owner,
+      stationID: row.stationID, blueprintTypeID: row.typeID,
+      blueprintName: String((plan && plan.blueprintName) || ""),
+      itemID: row.itemID || 0, source: "hangar", at: now};
+    try { atomic(file, receipt); } catch (_error) { continue; }
+    adopted.push({stationID: row.stationID, blueprintTypeID: row.typeID,
+      blueprintName: receipt.blueprintName, itemID: receipt.itemID});
+    note("BLUEPRINT_ADOPTED", {systemID, ownerID: owner, stationID: row.stationID,
+      blueprintTypeID: row.typeID, blueprintName: receipt.blueprintName});
+  }
+  return {status: adopted.length ? "ADOPTED" : "NOTHING_NEW", adopted};
+}
+
 // Give the corporation one REAL blueprint item so it can manufacture at all. This is
 // a seeding step like the seed market, and it refuses to run twice.
 function seedBlueprint({ ownerID, stationID, blueprintTypeID, systemID } = {}) {
@@ -243,4 +299,5 @@ function tick({ now = Date.now() } = {}) {
   return { status: completed.length ? "COMPLETED" : "IDLE", completed };
 }
 
-module.exports = { ENABLED, recipe, install, tick, seedBlueprint, timeScale, root };
+module.exports = { ENABLED, recipe, install, tick, seedBlueprint, adoptHeldBlueprints,
+  timeScale, root, BLUEPRINT_CATEGORY_ID };

@@ -210,6 +210,22 @@ function distributionRunAuthorities(options = {}) {
           },
         });
       },
+      // The missing direction of the loop: a hold is not a warehouse. Anything bought in
+      // space (a blueprint) must reach the corporation hangar before it can be built or sold
+      // on. Bounded by the same physical station test the trader uses.
+      stow: ({haulerID, stationID, categoryID}) => {
+        try {
+          return require("./coopNpcCargoStow").createCargoStow({
+            store, items, sceneFor, getStation: (id) => worldData.getStationByID(id),
+            resolveType: (id) => inventory.resolveItemByTypeID(id),
+            ownerID: Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129),
+            root: env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry",
+            probe: require("./coopRuntimeProbe"),
+          }).stow({haulerID, stationID, categoryID});
+        } catch (error) {
+          return {status: "STOW_THREW", reason: String(error && error.message || error).slice(0, 90)};
+        }
+      },
       lift: async ({haulerID, stationID, systemID, demand}) => {
         const lift = require("./coopNpcMineralLift").createMineralLift({
           store, items, getStation: (id) => worldData.getStationByID(id),
