@@ -320,12 +320,6 @@ async function runOnce(options = {}) {
         marketTimeoutMs);
       if (answer && answer.timeout === true) throw Error("MARKET_TIMEOUT");
       bid = answer;
-      if (answer && answer.price > 0) {
-        for (const material of plan.materials) {
-          materialValue += material.quantity * await regionalValue({region,
-            typeID: material.typeID, call, cache: valueCache, timeoutMs: marketTimeoutMs});
-        }
-      }
     } catch (error) {
       // An unreachable market is not a buyer: build nothing rather than guess demand.
       bid = null;
@@ -349,6 +343,20 @@ async function runOnce(options = {}) {
             status: "BUYER_ELSEWHERE", reason: "system " + num(elsewhere.systemID)});
         }
       } catch (_error) { /* no neighbour is no buyer */ }
+    }
+    // The value of the inputs must be known whether the buyer is in this station or one gate
+    // away: measured 2026-10-31 the local book bid nothing, the buyer was Jita, and the whole
+    // material valuation was skipped - so the loss-making Miner I recipe passed every gate.
+    if (bid && num(bid.price) > 0) {
+      try {
+        const call = options.call ||
+          ((method, params) => require("../services/market/marketDaemonClient")
+            .marketDaemonClient.call(method, params));
+        for (const material of plan.materials) {
+          materialValue += material.quantity * await regionalValue({region,
+            typeID: material.typeID, call, cache: valueCache, timeoutMs: marketTimeoutMs});
+        }
+      } catch (_error) { /* an input nobody quotes is not a proof of a loss */ }
     }
     const productValue = bid && bid.price > 0 ? plan.productPerRun * bid.price : 0;
     // A job that cannot pay for its own inputs is not production, it is spending.

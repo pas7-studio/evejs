@@ -8,6 +8,18 @@
 //
 // Nothing is invented: every phase keeps its own env flag and its own durable journals, so
 // this is a dispatcher, not a new authority. A throwing phase is reported and skipped.
+// A blueprint's recipe is static client data, and a station can quote hundreds of blueprints:
+// measured 2026-10-31, re-reading them for every hull beat a 25 s hull budget and the whole
+// run reported HULL_TIMEOUT. One lookup per type is the same answer, cached for the process.
+const blueprintRecipes = new Map();
+function blueprintRecipe(manufacture, typeID) {
+  const id = Number(typeID);
+  if (blueprintRecipes.has(id)) return blueprintRecipes.get(id);
+  let plan = null;
+  try { plan = manufacture.recipe(id, 1); } catch (_error) { plan = null; }
+  blueprintRecipes.set(id, plan);
+  return plan;
+}
 const PHASES = ["refinery", "manufacture", "distribution", "distributionRun"];
 let distributionRunInFlight = false;
 let lastDistributionRunStatus = null;
@@ -595,12 +607,15 @@ function distributionRunAuthorities(options = {}) {
             "where station_id=? and quantity>0").all(Number(stationID));
           const asks = [];
           const productOf = {};
+          // Only what the budget could ever buy: a recipe lookup for every seeded blueprint
+          // at a trade hub is what turned one beat into a HULL_TIMEOUT.
+          const priceCap = Number(process.env.EVEJS_COOP_BLUEPRINT_PRICE_CAP || 500000);
           for (const row of stock) {
             const typeID = Number(row.type_id);
+            if (!(Number(row.price) > 0) || Number(row.price) > priceCap) continue;
             const meta = inventory.resolveItemByTypeID(typeID) || {};
             if (Number(meta.categoryID) !== 9) continue;
-            let plan = null;
-            try { plan = manufacture.recipe(typeID, 1); } catch (_error) { plan = null; }
+            const plan = blueprintRecipe(manufacture, typeID);
             if (plan && plan.status === "READY") productOf[typeID] = Number(plan.productTypeID);
             asks.push({typeID, name: String(meta.name || typeID), stationID: Number(row.station_id),
               price: Number(row.price) || 0, quantity: Number(row.quantity) || 0});
@@ -612,8 +627,7 @@ function distributionRunAuthorities(options = {}) {
           // at: a blueprint bought in Jita is worthless there and profitable at home.
           const buildStation = factoryStation() || Number(stationID);
           for (const typeID of Object.keys(productOf)) {
-            let plan = null;
-            try { plan = manufacture.recipe(Number(typeID), 1); } catch (_error) { plan = null; }
+            const plan = blueprintRecipe(manufacture, Number(typeID));
             if (!plan || plan.status !== "READY") continue;
             let runs = Infinity;
             for (const material of plan.materials || []) {
@@ -654,8 +668,7 @@ function distributionRunAuthorities(options = {}) {
           // corporation's own Tritanium is free to turn into something that does have a buyer.
           const unitCostOf = {};
           for (const typeID of Object.keys(productOf)) {
-            let plan = null;
-            try { plan = manufacture.recipe(Number(typeID), 1); } catch (_error) { plan = null; }
+            const plan = blueprintRecipe(manufacture, Number(typeID));
             if (!plan || plan.status !== "READY") continue;
             let cost = 0;
             for (const material of plan.materials || []) {
