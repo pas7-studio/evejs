@@ -63,14 +63,23 @@ function distributionRunAuthorities(options = {}) {
     // MATERIALS_MISSING 34:1324/3892702 35:481/0 36:119/0.
     // The reserve is recomputed from disk and the book, so it is cached for two minutes per
     // station: the same answer must not cost a recipe lookup and a SQL query every beat.
-    const reserveCache = new Map();
-    const industryReserve = (stationID) => {
+    // What the corporation's OWN blueprints still need at a station is not freight. Measured
+    // 2026-10-31: the merchant shipped every unit of Pyerite and Mexallon the factory needed,
+    // so the hangar held 3.8 M Tritanium and the manufacturer answered
+    // MATERIALS_MISSING 34:1324/3892702 35:481/0 36:119/0.
+    //
+    // Only a blueprint whose product somebody really bids for reserves material: reserving for
+    // every style the corporation owns would lock 12 562 Pyerite for ammunition no station in
+    // the region buys. The answer is cached for two minutes per station - the same reply must
+    // not cost a recipe lookup and a SQL query on every beat.
+    const supplyCache = new Map();
+    const factorySupply = (stationID) => {
+      const station = Number(stationID);
+      if (!station) return null;
+      const cached = supplyCache.get(station);
+      if (cached && Date.now() - cached.at < 120000) return cached.value;
+      const keep = (value) => { supplyCache.set(station, {at: Date.now(), value}); return value; };
       try {
-        const station = Number(stationID);
-        if (!station) return null;
-        const cached = reserveCache.get(station);
-        if (cached && Date.now() - cached.at < 120000) return cached.value;
-        const keep = (value) => { reserveCache.set(station, {at: Date.now(), value}); return value; };
         const owner = Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129);
         const root = env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry";
         const nodeFs = require("node:fs");
@@ -91,9 +100,6 @@ function distributionRunAuthorities(options = {}) {
         if (!blueprints.length) return keep(null);
         const supply = require("./coopNpcInputSupply");
         const manufacture = require("./coopNpcManufacture");
-        // Only reserve material for a product somebody really bids for. Measured 2026-10-31:
-        // reserving for every style the corporation owns would lock 12 562 Pyerite for
-        // ammunition that no station in the region bids a single ISK for.
         const db = openDb();
         const wanted = [];
         for (const row of blueprints) {
@@ -107,18 +113,24 @@ function distributionRunAuthorities(options = {}) {
               .get(Number(plan.productTypeID)) : null;
           } catch (_error) { bid = null; }
           if (!bid || Number(bid.volume) <= 0) continue;
-          wanted.push(row);
+          wanted.push({...row, productTypeID: Number(plan.productTypeID)});
         }
         if (!wanted.length) return keep(null);
         const held = supply.heldAt({items, ownerID: owner, stationID: station});
-        const plan = supply.planSupply({blueprints: wanted, held, runs: 2, maxTypes: 6, stationID: station,
+        const plan = supply.planSupply({blueprints: wanted, held, runs: num(env.EVEJS_COOP_INPUT_RUNS) || 2,
+          maxTypes: 6, stationID: station,
           recipe: (blueprintTypeID, runs) => manufacture.recipe(blueprintTypeID, runs)});
-        // Keep the FULL requirement home, not only today's shortfall: once the hangar holds
-        // what the factory needs, a shortfall reserve would let it all leave again.
-        const map = {};
-        for (const need of plan.totals || []) if (need.need > 0) map[need.typeID] = need.need;
-        return keep(Object.keys(map).length ? map : null);
-      } catch (_error) { return null; }
+        return keep({...plan, stationID: station, held});
+      } catch (_error) { return keep(null); }
+    };
+    // Keep the FULL requirement home, not only today's shortfall: once the hangar holds what the
+    // factory needs, a shortfall-only reserve would let it all leave again on the next trip.
+    const industryReserve = (stationID) => {
+      const plan = factorySupply(stationID);
+      if (!plan) return null;
+      const map = {};
+      for (const need of plan.totals || []) if (need.need > 0) map[need.typeID] = need.need;
+      return Object.keys(map).length ? map : null;
     };
     // The hull needs an identity the registry will accept: the one already bound to it, or
     // the lowest free name (the crossing itself links it from the durable record).
@@ -277,6 +289,56 @@ function distributionRunAuthorities(options = {}) {
       // The missing direction of the loop: a hold is not a warehouse. Anything bought in
       // space (a blueprint) must reach the corporation hangar before it can be built or sold
       // on. Bounded by the same physical station test the trader uses.
+      // Import what this system cannot produce. The refinery here only sees Veldspar
+      // (`refined 17471 -> 1 mineral`), so Pyerite and Mexallon exist only at a station that
+      // really sells them; a hull standing there with an empty hold is the ship that carries
+      // them home, where they stow into the factory hangar.
+      buyInputs: async ({haulerID, stationID, systemID}) => {
+        try {
+          const owner = Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129);
+          let home = Number(env.EVEJS_COOP_INDUSTRY_STATION || 0) || 0;
+          if (!home) {
+            const nodeFs = require("node:fs");
+            const nodePath = require("node:path");
+            const root = env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry";
+            const counts = new Map();
+            try {
+              for (const name of nodeFs.readdirSync(nodePath.join(root, "blueprints"))) {
+                if (!name.endsWith(".json")) continue;
+                let row = null;
+                try { row = JSON.parse(nodeFs.readFileSync(nodePath.join(root, "blueprints", name), "utf8")); }
+                catch (_error) { continue; }
+                if (!row || String(row.status) !== "SEEDED" || Number(row.ownerID) !== owner) continue;
+                const station = Number(row.stationID) || 0;
+                if (station) counts.set(station, (counts.get(station) || 0) + 1);
+              }
+            } catch (_error) { /* no receipts is no factory */ }
+            home = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 0;
+          }
+          if (!home) return {status: "NO_FACTORY_STATION"};
+          if (Number(home) === Number(stationID)) return {status: "NOTHING_TO_BUY"};
+          const plan = factorySupply(home);
+          const need = (plan && Array.isArray(plan.needs) ? plan.needs : [])[0] || null;
+          if (!need) return {status: "NOTHING_TO_BUY"};
+          const answer = await require("./coopVirtualWorldRuntime").buyFromStationStock({
+            systemID: Number(systemID), stationID: Number(stationID), typeID: Number(need.typeID),
+            haulerID: Number(haulerID), intent: "input"});
+          const status = String(answer && answer.status || "NO_ANSWER");
+          if (status === "TRADE_SETTLED") {
+            try { require("./coopRuntimeProbe").observe("living-npc-input-bought", null,
+              {spaceState: {systemID: Number(systemID), stationID: Number(stationID)}},
+              {haulerID: Number(haulerID), typeID: Number(need.typeID), stationID: Number(home),
+               quantity: Number(answer.quantity || 0), price: Number(answer.price || 0),
+               status: "BOUGHT"}); } catch (_error) { /* telemetry only */ }
+            return {status: "BOUGHT", typeID: Number(need.typeID),
+              quantity: Number(answer.quantity || 0), price: Number(answer.price || 0),
+              stillShort: Math.max(0, Number(need.short || 0) - Number(answer.quantity || 0))};
+          }
+          return {status, typeID: Number(need.typeID)};
+        } catch (error) {
+          return {status: "BUY_THREW", reason: String(error && error.message || error).slice(0, 80)};
+        }
+      },
       stow: ({haulerID, stationID, categoryID}) => {
         try {
           return require("./coopNpcCargoStow").createCargoStow({

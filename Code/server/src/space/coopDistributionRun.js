@@ -19,7 +19,7 @@ const path = require("path");
 
 const PHASE = Object.freeze({
   PLAN: "PLAN", TO_ORIGIN: "TO_ORIGIN", LOAD: "LOAD", CROSS: "CROSS",
-  TO_DEST: "TO_DEST", SELL: "SELL", RETURN: "RETURN", DONE: "DONE",
+  TO_DEST: "TO_DEST", SELL: "SELL", SUPPLY: "SUPPLY", RETURN: "RETURN", DONE: "DONE",
   BLOCKED: "BLOCKED",
 });
 // How close a hull must really be before a station lift or sale is allowed to act. The
@@ -29,6 +29,9 @@ const STATION_RANGE_M = 8000;
 // One sale call fills at most the market's own per-order limit, so a loaded hold may need
 // several; the count is bounded so a silent market cannot become an endless loop.
 const MAX_SELL_CALLS = 6;
+// An import run buys in bounded steps: the market caps one purchase and spaces them out, so a
+// visit that keeps buying is a visit that is really filling the hold, not spinning.
+const MAX_SUPPLY_TRIES = 40;
 // A slow market daemon is not a failed sale: the wait is bounded by time.
 const SALE_SETTLE_TIMEOUT_MS = 15 * 60 * 1000;
 // How often one beat asks again while the market is still thinking, and how long it waits
@@ -421,10 +424,39 @@ async function tick(haulerID, authorities = {}, env = process.env) {
           lastReason: "STOWED:" + moved.map((row) => row.typeID).join(",") }, env);
         note(observe, "living-distribution-run", now2, { reason: now2.lastReason });
         state = now2;
+      } else if (stored && stored.status && stored.status !== "NOTHING_TO_STOW") {
+        // A refusal that says nothing is the same as no attempt: name every one of them.
+        note(observe, "living-distribution-stow", state,
+          { reason: String(stored.status).slice(0, 60), stationID: pos(state.fromStationID) });
       }
     }
   }
-  const step = decide(state, facts);
+  // Import phase: buy what the factory lacks at the station that really sells it, bounded, then
+  // go home where the hold stows into the hangar and the manufacturer can finally run.
+  if (String(state.phase) === PHASE.SUPPLY && typeof authorities.buyInputs === "function") {
+    let answer = null;
+    try {
+      answer = await authorities.buyInputs({ haulerID: id, stationID: pos(state.toStationID),
+        systemID: pos(state.toSystemID) });
+    } catch (_error) { answer = { status: "BUY_THREW" }; }
+    const status = String(answer && answer.status || "NO_ANSWER");
+    const tries = num(state.supplyTries) + 1;
+    if ((status === "BOUGHT" || status === "COOLDOWN") && tries < MAX_SUPPLY_TRIES) {
+      const waiting = write({ ...state, phase: PHASE.SUPPLY, supplyTries: tries, updatedAt: now,
+        lastReason: status === "BOUGHT"
+          ? "SUPPLIED:" + num(answer.typeID) + "x" + num(answer.quantity)
+          : "SUPPLY_COOLDOWN" }, env);
+      note(observe, "living-distribution-run", waiting, { reason: waiting.lastReason });
+      return { status: waiting.lastReason, state: waiting };
+    }
+    const reason = status === "BOUGHT" || status === "NOTHING_TO_BUY" || status === "COOLDOWN"
+      ? "SUPPLIED_ALL" : "SUPPLY_STOPPED:" + status.slice(0, 40);
+    const home = write({ ...state, phase: PHASE.RETURN, supplyTries: 0, updatedAt: now,
+      lastReason: reason, crossAt: 0, returnToSystemID: pos(state.fromSystemID),
+      returnStationID: pos(state.fromStationID) }, env);
+    note(observe, "living-distribution-run", home, { reason });
+    return { status: "RETURN", reason, state: home };
+  }  const step = decide(state, facts);
   const finish = (phase, reason, extra = {}) => {
     const stamp = phase === PHASE.BLOCKED ? { blockedAt: now } : {};
     const next = write({ ...state, ...stamp, ...extra, phase, lastReason: reason, updatedAt: now }, env);
@@ -481,6 +513,9 @@ async function tick(haulerID, authorities = {}, env = process.env) {
         const moved = (stored.stowed || []).filter((row) => row.status === "STOWED");
         note(observe, "living-distribution-run", state,
           { reason: "STOWED:" + moved.map((row) => row.typeID).join(",") });
+      } else if (stored && stored.status && stored.status !== "NOTHING_TO_STOW") {
+        note(observe, "living-distribution-stow", state,
+          { reason: String(stored.status).slice(0, 60), stationID: stop.stationID });
       }
     }
     // Buy a blueprint where the hull LOADS: that is the station the corporation keeps its
@@ -584,6 +619,14 @@ async function tick(haulerID, authorities = {}, env = process.env) {
       // The goods are gone, but this is NOT a payment row: measured 2026-10-30 the ledger got
       // rows from here that no settlement could ever back, and the cross-check called it out.
       // The run records the delivery in its own journal instead.
+      // ...and the same hull is the one that can carry the factory's inputs home.
+      if (typeof authorities.buyInputs === "function" &&
+        num(state.supplyTries) < MAX_SUPPLY_TRIES) {
+        const importing = write({ ...state, phase: PHASE.SUPPLY, supplyTries: 0, updatedAt: now,
+          soldAt: now, lastReason: "IMPORTING_INPUTS", pendingSince: 0 }, env);
+        note(observe, "living-distribution-run", importing, { reason: importing.lastReason });
+        return { status: "IMPORTING", state: importing };
+      }
       return finish(PHASE.DONE, "SOLD_VERIFIED_BY_HOLD", { soldAt: now, iskUnknown: true });
     }
     if (typeof authorities.sell !== "function") return { status: "NO_SELL" };
@@ -673,6 +716,18 @@ async function tick(haulerID, authorities = {}, env = process.env) {
       appendFreight(state, settlement, env);
       // A hull that sits in the buyer system with an empty hold is dead freight: it goes home
       // and takes another load, bounded by a trip count so a cycle cannot run for ever.
+      // The corporation imports what this system cannot make: measured 2026-10-31 the refinery
+      // here only ever saw Veldspar (`refined 17471 -> 1 mineral`), so the Pyerite and Mexallon
+      // the factory needs exist only at a station that really sells them. A hull standing at the
+      // buyer's station with an empty hold is exactly the ship that can carry them home.
+      if (typeof authorities.buyInputs === "function" &&
+        num(state.supplyTries) < MAX_SUPPLY_TRIES) {
+        const buying = write({ ...state, phase: PHASE.SUPPLY, sellCalls: 0, isk: paid, trips,
+          settlement, soldAt: now, pendingSince: 0, supplyTries: 0,
+          lastReason: "IMPORTING_INPUTS", updatedAt: now }, env);
+        note(observe, "living-distribution-run", buying, { reason: buying.lastReason });
+        return { status: "IMPORTING", state: buying };
+      }
       if (authorities.recycle !== true || trips >= MAX_TRIPS) {
         return finish(PHASE.DONE, "SOLD", { isk: paid, sellCalls: calls, soldAt: now,
           trips, settlement });
