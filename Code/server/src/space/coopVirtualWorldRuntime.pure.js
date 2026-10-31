@@ -255,6 +255,20 @@ function warPilotFaction(pilotID){
   const faction=Number(row&&row.factionID);
   if(Number.isSafeInteger(faction)&&faction>0)return faction;
  }catch(_error){/* a missing registry is simply no faction */}
+ // FW-137 (measured 16:58:14Z): the registry row is released WITH the wreck, so a fallen
+ // pilot had no faction left anywhere and its own death benefit answered
+ // WAR_TREASURY_PAYOUT_NOT_AUTHORIZED although the casualty ledger held the very same
+ // pilot with its victimFactionID. The persisted casualty record is the last authority
+ // that still says which faction this pilot died for.
+ try{
+  const cas=require("./coopWarCasualtyLedger"),
+   row=require("./coopNativeRowPath").readRow(require("../gameStore"),
+    cas.TABLE,cas.KEY,cas.validate);
+  const hit=Object.values((row&&row.byWreck)||{})
+   .find(e=>String(e&&e.pilotID)===String(pilotID));
+  const faction=Number(hit&&hit.victimFactionID);
+  if(Number.isSafeInteger(faction)&&faction>0)return faction;
+ }catch(_error){/* a missing ledger is simply no faction */}
  return 0;
 }
 
