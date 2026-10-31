@@ -11,7 +11,9 @@
 //
 // It reads the market database READ-ONLY: the market daemon is a separate process and its RPC
 // timed out live on 2026-10-29, which must never turn a decision into a stall.
-const { plan, planBundle } = require("./coopNpcDistribution");
+// FW-121: the deployed overlay renames siblings to .js, the archive mirror keeps .cjs.
+const { plan, planBundle } = require("./coopNpcDistribution" +
+  (__filename.endsWith(".js") ? "" : ".cjs"));
 
 const pos = (x) => (Number.isSafeInteger(Number(x)) && Number(x) > 0 ? Number(x) : 0);
 const num = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
@@ -228,4 +230,70 @@ function stockSystems({ items, worldData, corpID = 1000129 } = {}) {
   return [...totals.values()].sort((a, b) => b.units - a.units);
 }
 
-module.exports = { stationForTypes, stockSystems, planTrip, gateNeighbours, seededBids, stationRowsOfSystem };
+/**
+ * FW-121: the NEAREST station that really bids for what a hull is carrying, by gate hops.
+ *
+ * MEASURED on the play stack 2026-10-31: 1 576 native cargo rows across 19 types sat in NPC
+ * holds, and NOT ONE of those types had a seeded buyer in any of the six war or mining systems.
+ * Selling therefore always means travelling, and the only buyer finder in the server looked a
+ * single gate away. This walks the real gate graph ring by ring and asks the seeded book for
+ * each ring in ONE query, so the answer is the nearest real market, not the nearest guess.
+ *
+ * Returns {status:"OK", systemID, stationID, hops, volume, price} or {status:"NO_BUYER"}.
+ * It reads only the market book and the adjacency it is handed; it moves nothing.
+ */
+function nearestBuyerForTypes({ db, fromSystemID, typeIDs = [], neighbours, maxHops = 12,
+  maxSystems = 600 } = {}) {
+  const from = pos(fromSystemID);
+  const want = [...new Set((Array.isArray(typeIDs) ? typeIDs : []).map(Number).filter(Boolean))];
+  if (!db || !from || !want.length) return { status: "UNKNOWN", stationID: 0 };
+  if (typeof neighbours !== "function") return { status: "NO_GATE_GRAPH", stationID: 0 };
+  const hopLimit = Math.max(0, Math.min(32, Number(maxHops) || 12));
+  const budget = Math.max(1, Math.min(4000, Number(maxSystems) || 600));
+  const seen = new Set([from]);
+  let ring = [from];
+  let hops = 0;
+  let visited = 0;
+  const typePlaceholders = want.map(() => "?").join(",");
+  while (ring.length && hops <= hopLimit && visited < budget) {
+    const ask = ring.slice(0, Math.max(1, budget - visited));
+    visited += ask.length;
+    let rows = [];
+    try {
+      rows = db.prepare("select solar_system_id as sys, station_id as station, " +
+        "sum(quantity) as volume, max(price) as price from seed_buy_orders " +
+        "where quantity>0 and solar_system_id in (" + ask.map(() => "?").join(",") + ") " +
+        "and type_id in (" + typePlaceholders + ") " +
+        "group by sys, station").all(...ask, ...want);
+    } catch (_error) { return { status: "BOOK_UNREADABLE", stationID: 0 }; }
+    let best = null;
+    for (const row of rows) {
+      const stationID = pos(row && row.station);
+      const systemID = pos(row && row.sys);
+      const volume = num(row && row.volume);
+      if (!stationID || !systemID || volume <= 0) continue;
+      if (!best || volume > best.volume ||
+        (volume === best.volume && stationID < best.stationID)) {
+        best = { systemID, stationID, volume, price: num(row && row.price) };
+      }
+    }
+    if (best) return { status: "OK", hops, ...best };
+    const next = [];
+    for (const systemID of ask) {
+      let list = [];
+      try { list = neighbours(systemID) || []; } catch (_error) { list = []; }
+      for (const raw of list) {
+        const id = Number(raw);
+        if (!pos(id) || seen.has(id)) continue;
+        seen.add(id);
+        next.push(id);
+      }
+    }
+    ring = next.sort((a, b) => a - b);
+    hops += 1;
+  }
+  return { status: "NO_BUYER", stationID: 0, hopsSearched: hops - 1, systemsVisited: visited };
+}
+
+module.exports = { stationForTypes, stockSystems, planTrip, gateNeighbours, seededBids,
+  stationRowsOfSystem, nearestBuyerForTypes };
