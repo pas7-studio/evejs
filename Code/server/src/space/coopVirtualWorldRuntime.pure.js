@@ -228,6 +228,9 @@ function warTreasuryStore(){
 // FW-125: one predicate for "this is a real war participant", shared with the merit
 // ledger, so a named co-op pilot is never mistaken for an invalid id.
 function isWarPilotRef(value){
+ // A numeric id was accepted before FW-125 and stays accepted: a mercenary settlement
+ // names one. A named co-op pilot is the case that was missing.
+ if(Number.isSafeInteger(Number(value))&&Number(value)>0)return true;
  try{return require("./coopWarPilotID"+siblingSuffix).isWarPilotID(value)===true}
  catch(_error){return false}
 }
