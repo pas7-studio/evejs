@@ -215,6 +215,14 @@ const DAILY_GOAL_PROTO_ROOT = protobuf.Root.fromJSON({
                 RedeemedNotice: {
                   fields: { goal: { type: "eve_public.dailygoal.Identifier", id: 1 } },
                 },
+                // A goal that really advanced, and one that reached its target. Both carry the
+                // goal id only: the client re-reads the goal it already has.
+                ProgressedNotice: {
+                  fields: { goal: { type: "eve_public.dailygoal.Identifier", id: 1 } },
+                },
+                CompletedNotice: {
+                  fields: { goal: { type: "eve_public.dailygoal.Identifier", id: 1 } },
+                },
                 PayForCompletionRequest: {
                   fields: { goal: { type: "eve_public.dailygoal.Identifier", id: 1 } },
                 },
@@ -373,7 +381,97 @@ function createDailyGoalGatewayService(context = {}) {
     redeemedNotice: DAILY_GOAL_PROTO_ROOT.lookupType(
       "eve_public.dailygoal.api.RedeemedNotice",
     ),
+    progressedNotice: DAILY_GOAL_PROTO_ROOT.lookupType(
+      "eve_public.dailygoal.api.ProgressedNotice",
+    ),
+    completedNotice: DAILY_GOAL_PROTO_ROOT.lookupType(
+      "eve_public.dailygoal.api.CompletedNotice",
+    ),
   };
+
+  // Progress is measured, never remembered by the client: a goal only moves while the player is
+  // playing, and the card has to move with it. One tick for every logged-in character, one notice
+  // per goal that really advanced, and CompletedNotice only when it crosses the target.
+  const progressSeen = new Map();
+  const TICK_MS = 15_000;
+
+  function announceProgress(characterID, nowMs) {
+    if (typeof context.publishGatewayNotice !== "function") return 0;
+    const owner = Number(characterID) || 0;
+    if (!(Number.isSafeInteger(owner) && owner > 0)) return 0;
+    const snapshot = dailyGoals.snapshotFor(owner, nowMs);
+    if (!snapshot || snapshot.status !== "OBSERVED") return 0;
+    const dayStart = Math.floor(nowMs / DAY_MS) * DAY_MS;
+    let seen = progressSeen.get(owner);
+    if (!seen || seen.dayStart !== dayStart) {
+      // First sight of a character, or a new day: recorded, never announced. The goal list the
+      // client already holds is the baseline, and a fresh day starts at zero anyway.
+      seen = { dayStart, byGoal: new Map() };
+      progressSeen.set(owner, seen);
+      for (const entry of snapshot.goals) seen.byGoal.set(entry.definition.goalID, entry.progress);
+      return 0;
+    }
+    let announced = 0;
+    for (const entry of snapshot.goals) {
+      const key = entry.definition.goalID;
+      const previous = seen.byGoal.has(key) ? seen.byGoal.get(key) : entry.progress;
+      seen.byGoal.set(key, entry.progress);
+      if (!(entry.progress > previous)) continue;
+      const goal = { uuid: uuidStringToBuffer(key) };
+      context.publishGatewayNotice(
+        "eve_public.dailygoal.api.ProgressedNotice",
+        encodePayload(types.progressedNotice, { goal }),
+        { character: owner },
+      );
+      announced += 1;
+      if (entry.completed && previous < entry.target) {
+        context.publishGatewayNotice(
+          "eve_public.dailygoal.api.CompletedNotice",
+          encodePayload(types.completedNotice, { goal }),
+          { character: owner },
+        );
+        announced += 1;
+      }
+    }
+    return announced;
+  }
+
+  function activeCharacterIDs() {
+    try {
+      const sessionRegistry = require(path.join(
+        __dirname,
+        "../../../services/chat/sessionRegistry",
+      ));
+      const sessions = typeof sessionRegistry.getSessions === "function"
+        ? sessionRegistry.getSessions() : [];
+      const ids = new Set();
+      for (const session of sessions) {
+        const id = Number(sessionRegistry.resolveSessionCharacterID(session)) || 0;
+        if (id > 0) ids.add(id);
+      }
+      return [...ids];
+    } catch (error) {
+      // No session registry to read: nothing to measure, and no invented players.
+      return [];
+    }
+  }
+
+  let ticker = null;
+  function startTicker() {
+    if (ticker || context.disableDailyGoalTicker === true) return;
+    if (typeof context.publishGatewayNotice !== "function") return;
+    ticker = setInterval(() => {
+      const nowMs = Date.now();
+      for (const id of activeCharacterIDs()) {
+        try {
+          announceProgress(id, nowMs);
+        } catch (error) {
+          // One unreadable character must not stop the others.
+        }
+      }
+    }, TICK_MS);
+    if (typeof ticker.unref === "function") ticker.unref();
+  }
 
   // The client's daily-goal messenger subscribes to RedeemedNotice (dailygoals/client/
   // goalMessenger.pyj). Publishing it after a real redeem is what makes the card update
@@ -424,9 +522,13 @@ function createDailyGoalGatewayService(context = {}) {
     };
   }
 
+  startTicker();
+
   return {
     name: "daily-goals",
     handledRequestTypes: HANDLED_REQUEST_TYPES,
+    // Exposed so a test can drive one measurement without waiting for the timer.
+    announceProgress,
     getEmptySuccessResponseType() {
       return null;
     },
