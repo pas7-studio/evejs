@@ -95,7 +95,7 @@ function createWarEngagementWarp({
 
   function tick({ systemIDs = [] } = {}) {
     if (!enabled(env)) return { status: "DISABLED", orders: [], skips: [] };
-    if (!Array.isArray(systemIDs) || systemIDs.length > 20) {
+    if (!Array.isArray(systemIDs) || systemIDs.length > 512) {
       return { status: "INVALID_SYSTEMS", orders: [], skips: [] };
     }
     let state, ships;

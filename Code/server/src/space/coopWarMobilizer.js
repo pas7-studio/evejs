@@ -103,7 +103,7 @@ function createWarMobilizer({registry,readWarState,readLinks,sceneForSystem,
  function tick({systemIDs=[],dryRun=false}={}){
   if(!enabled(env))return {status:"DISABLED",mobilized:[],campaigns:[]};
   if(busy)return {status:"BUSY",mobilized:[],campaigns:[]};
-  if(!Array.isArray(systemIDs)||systemIDs.length>20||systemIDs.some(x=>!pos(x)))
+  if(!Array.isArray(systemIDs)||systemIDs.length>512||systemIDs.some(x=>!pos(x)))
    return {status:"INVALID_SYSTEMS",mobilized:[],campaigns:[]};
   busy=true;
   try{

@@ -78,7 +78,7 @@ function createWarBattleLineRelief({
   }
 
   function tick({ systemIDs = [] } = {}) {
-    if (!Array.isArray(systemIDs) || systemIDs.length > 20) {
+    if (!Array.isArray(systemIDs) || systemIDs.length > 512) {
       return { status: "INVALID_SYSTEMS", released: [], blocked: [], dry: [] };
     }
     const systems = new Set(systemIDs.map(Number).filter(pos));

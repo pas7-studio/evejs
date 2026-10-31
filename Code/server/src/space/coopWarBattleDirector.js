@@ -40,7 +40,7 @@ function createWarBattleDirector({authority,bridge,sceneForSystem,
  function tick({systemIDs=[]}={}){
   if(!combatEnabled(env)||!ammoEnabled(env))
    return {status:"DISABLED_OR_UNSAFE_AMMO",orders:[]};
-  if(!Array.isArray(systemIDs)||systemIDs.length>20)
+  if(!Array.isArray(systemIDs)||systemIDs.length>512)
    return {status:"INVALID_SYSTEMS",orders:[]};
   const at=clock(),orders=[],selections=[];
   if(!pos(at))return {status:"INVALID_CLOCK",orders};

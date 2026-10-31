@@ -40,7 +40,7 @@ function createWarObjectiveDirector({adjudicator,combatProof,
   const types=typesFromEnv(env);
   if(!types.size)return {status:"NO_APPROVED_OBJECTIVE_TYPES",events:[]};
   if(busy)return {status:"BUSY",events:[]};
-  if(!Array.isArray(systemIDs)||systemIDs.length>20||
+  if(!Array.isArray(systemIDs)||systemIDs.length>512||
    systemIDs.some(x=>!POS(x)))
    return {status:"INVALID_SYSTEMS",events:[]};
   busy=true;

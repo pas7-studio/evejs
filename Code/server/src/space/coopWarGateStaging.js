@@ -51,7 +51,7 @@ function createWarGateStaging({readWar,readFleet,readTreasury,
  function tick({systemIDs=[]}={}){
   if(!gate(env))return {status:"DISABLED",reason:gateReason(env),orders:[],
    observations:[],skips:[]};
-  if(!Array.isArray(systemIDs)||systemIDs.length>20||
+  if(!Array.isArray(systemIDs)||systemIDs.length>512||
    systemIDs.some(x=>!pos(x)))return {status:"INVALID_SYSTEMS",orders:[],
    observations:[],skips:[]};
   let war,fleet,treasury;

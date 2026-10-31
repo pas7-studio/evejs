@@ -23,7 +23,7 @@ function createWarDemobilizer({registry,readWarState,readLinks,
  function tick({systemIDs=[]}={}){
   if(!enabled(env))return {status:"DISABLED",demobilized:[]};
   if(busy)return {status:"BUSY",demobilized:[]};
-  if(!Array.isArray(systemIDs)||systemIDs.length>20||
+  if(!Array.isArray(systemIDs)||systemIDs.length>512||
    systemIDs.some(x=>!pos(x)))
    return {status:"INVALID_SYSTEMS",demobilized:[]};
   busy=true;

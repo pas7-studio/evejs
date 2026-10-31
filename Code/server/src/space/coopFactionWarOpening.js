@@ -903,7 +903,7 @@ function createWarOpening({
   let busy = false;
   function tick({ systemIDs = [], isCampaignFunded = null } = {}) {
     if (busy) return { status: "BUSY" };
-    if (!Array.isArray(systemIDs) || systemIDs.length > 20) return { status: "INVALID_SYSTEMS" };
+    if (!Array.isArray(systemIDs) || systemIDs.length > 512) return { status: "INVALID_SYSTEMS" };
     busy = true;
     try {
       let state, links;
