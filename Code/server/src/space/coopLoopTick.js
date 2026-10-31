@@ -57,6 +57,69 @@ function distributionRunAuthorities(options = {}) {
       }
       return db || null;
     };
+    // What the corporation's OWN blueprints still need at a station is not freight. Measured
+    // 2026-10-31: the merchant shipped every unit of Pyerite and Mexallon the factory needed,
+    // so the hangar held 3.8 M Tritanium and the manufacturer answered
+    // MATERIALS_MISSING 34:1324/3892702 35:481/0 36:119/0.
+    // The reserve is recomputed from disk and the book, so it is cached for two minutes per
+    // station: the same answer must not cost a recipe lookup and a SQL query every beat.
+    const reserveCache = new Map();
+    const industryReserve = (stationID) => {
+      try {
+        const station = Number(stationID);
+        if (!station) return null;
+        const cached = reserveCache.get(station);
+        if (cached && Date.now() - cached.at < 120000) return cached.value;
+        const keep = (value) => { reserveCache.set(station, {at: Date.now(), value}); return value; };
+        const owner = Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129);
+        const root = env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry";
+        const nodeFs = require("node:fs");
+        const nodePath = require("node:path");
+        let names = [];
+        try { names = nodeFs.readdirSync(nodePath.join(root, "blueprints")); }
+        catch (_error) { return keep(null); }
+        const blueprints = [];
+        for (const name of names) {
+          if (!name.endsWith(".json")) continue;
+          let row = null;
+          try { row = JSON.parse(nodeFs.readFileSync(nodePath.join(root, "blueprints", name), "utf8")); }
+          catch (_error) { continue; }
+          if (!row || String(row.status) !== "SEEDED") continue;
+          if (Number(row.ownerID) !== owner || Number(row.stationID) !== station) continue;
+          blueprints.push({blueprintTypeID: Number(row.blueprintTypeID), stationID: station});
+        }
+        if (!blueprints.length) return keep(null);
+        const supply = require("./coopNpcInputSupply");
+        const manufacture = require("./coopNpcManufacture");
+        // Only reserve material for a product somebody really bids for. Measured 2026-10-31:
+        // reserving for every style the corporation owns would lock 12 562 Pyerite for
+        // ammunition that no station in the region bids a single ISK for.
+        const db = openDb();
+        const wanted = [];
+        for (const row of blueprints) {
+          let plan = null;
+          try { plan = manufacture.recipe(row.blueprintTypeID, 1); } catch (_error) { plan = null; }
+          if (!plan || plan.status !== "READY") continue;
+          let bid = null;
+          try {
+            bid = db ? db.prepare("select sum(quantity) as volume from seed_buy_orders " +
+              "where type_id=? and quantity>0 and solar_system_id in (30000142,30000144,30000145)")
+              .get(Number(plan.productTypeID)) : null;
+          } catch (_error) { bid = null; }
+          if (!bid || Number(bid.volume) <= 0) continue;
+          wanted.push(row);
+        }
+        if (!wanted.length) return keep(null);
+        const held = supply.heldAt({items, ownerID: owner, stationID: station});
+        const plan = supply.planSupply({blueprints: wanted, held, runs: 2, maxTypes: 6, stationID: station,
+          recipe: (blueprintTypeID, runs) => manufacture.recipe(blueprintTypeID, runs)});
+        // Keep the FULL requirement home, not only today's shortfall: once the hangar holds
+        // what the factory needs, a shortfall reserve would let it all leave again.
+        const map = {};
+        for (const need of plan.totals || []) if (need.need > 0) map[need.typeID] = need.need;
+        return keep(Object.keys(map).length ? map : null);
+      } catch (_error) { return null; }
+    };
     // The hull needs an identity the registry will accept: the one already bound to it, or
     // the lowest free name (the crossing itself links it from the durable record).
     const pilotFor = (haulerID) => {
@@ -201,6 +264,7 @@ function distributionRunAuthorities(options = {}) {
         const systemID = Number(native && native.systemID) || 0;
         return require("./coopDistributionPlan").planTrip({
           haulerID, store, items, inventory, db: openDb(), worldData, scene: sceneFor(systemID),
+          reserve: industryReserve,
           connectedGates: ({sourceSystemID, targetSystemID}) => {
             const pair = require("./coopNpcGateTravel").connectedGates({
               sourceSystemID, targetSystemID, sourceScene: sceneFor(sourceSystemID),
@@ -237,6 +301,7 @@ function distributionRunAuthorities(options = {}) {
           probe: require("./coopRuntimeProbe"),
         });
         return lift.lift({systemID, stationID, haulerID, cap: 1e6, demand,
+          reserve: industryReserve(stationID),
           capM3: Number(capacityM3) || 0,
           volumeOf: (id) => Number(inventory.resolveItemByTypeID(id)?.volume) || 0});
       },

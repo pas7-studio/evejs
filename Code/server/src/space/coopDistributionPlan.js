@@ -86,7 +86,7 @@ function seededBids(db, systemIDs) {
  * Returns {status:"OK", trip} or {status, reason} - never a trip it cannot pay for.
  */
 function planTrip({ haulerID, store, items, inventory, db, worldData, connectedGates,
-  scene = null, corpID = 1000129, minIsk = 200000, maxSystems = 6 } = {}) {
+  scene = null, corpID = 1000129, minIsk = 200000, maxSystems = 6, reserve = null } = {}) {
   const id = pos(haulerID);
   if (!id) return { status: "INVALID_ARGUMENT" };
   const native = store && typeof store.getNativeEntity === "function" ? store.getNativeEntity(id) : null;
@@ -124,7 +124,16 @@ function planTrip({ haulerID, store, items, inventory, db, worldData, connectedG
     if (Number(row.flagID) !== 4 || !(num(row.quantity) > 0)) continue;
     const typeID = pos(row.typeID);
     const meta = inventory.resolveItemByTypeID(typeID) || {};
-    stacks.push({ stationID, typeID, quantity: num(row.quantity),
+    // What the corporation's own blueprints still need at this station stays home: the
+    // factory and the merchant used to compete for the same Pyerite and the merchant won.
+    // The reserve may be a plain map or a resolver, because only the caller knows which
+    // stations it must ask about (the factory's own station is the only one that answers).
+    const held = (typeof reserve === "function" ? (reserve(stationID) || {})
+      : (reserve && (reserve[stationID] || reserve[String(stationID)]))) || {};
+    const needed = num(held[typeID] !== undefined ? held[typeID] : held[String(typeID)]);
+    const shippable = Math.max(0, num(row.quantity) - Math.max(0, Math.round(needed)));
+    if (!shippable) continue;
+    stacks.push({ stationID, typeID, quantity: shippable,
       m3PerUnit: num(meta.volume) });
   }
   if (!stacks.length) return { status: "NO_STOCK_IN_SYSTEM", systemID };
