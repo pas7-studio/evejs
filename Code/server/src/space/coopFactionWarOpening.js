@@ -70,15 +70,25 @@ const STALE_EXPIRY_REASONS = new Set(["WAR_ESCROW_MISSING"]);
 function countsAsFailure(campaign) {
   return !STALE_EXPIRY_REASONS.has(String((campaign && campaign.expiredReason) || ""));
 }
-function targetCooldownMs({ state, targetSystemID, baseMs = stallMs() } = {}) {
+function targetCooldownMs({ state, targetSystemID, baseMs = stallMs(),
+  nowMs = Date.now() } = {}) {
   const target = num(targetSystemID);
   const base = Math.max(1, num(baseMs) || 1);
   if (!pos(target) || !state || !state.campaigns) return base;
+  // FW-127 (measured 2026-10-31T13:59:14Z): every expiry a border had EVER produced
+  // counted towards its backoff, so after two days of fighting the multiplier reached
+  // 8 x 45 min = 6 h and the live war answered NO_OPENABLE_FRONT with 5 of its 8
+  // borders still cooling down - the war could not restart itself. Only expiries inside
+  // the backoff horizon count now, and the multiplier stops at 4: a border that keeps
+  // failing now still backs off, but its history can never shut it for a day.
+  const horizonMs = base * 8;
   const expired = Object.values(state.campaigns)
     .filter((campaign) => campaign && num(campaign.targetSystemID) === target &&
-      String(campaign.state) === "EXPIRED" && countsAsFailure(campaign)).length;
+      String(campaign.state) === "EXPIRED" && countsAsFailure(campaign) &&
+      (!num(campaign.expiredAt) || num(campaign.expiredAt) >= num(nowMs) - horizonMs))
+    .length;
   if (!expired) return base;
-  return base * Math.min(8, Math.pow(2, Math.min(3, expired - 1)));
+  return base * Math.min(4, Math.pow(2, Math.min(2, expired - 1)));
 }
 
 // FW-100: the in-memory pacing map has to obey the same rule as the durable record.
@@ -89,7 +99,8 @@ function targetCooldownMs({ state, targetSystemID, baseMs = stallMs() } = {}) {
 // time, so a lost-escrow release paces the border for the base window and no longer.
 function coolingDown(targetSystemID, nowMs, ttlMs = stallMs(), state = null) {
   const target = num(targetSystemID);
-  const window = targetCooldownMs({ state, targetSystemID: target, baseMs: ttlMs });
+  const window = targetCooldownMs({ state, targetSystemID: target, baseMs: ttlMs,
+    nowMs });
   const entry = recentlyExpired.get(target);
   const at = num(entry && entry.at !== undefined ? entry.at : entry);
   if (at) {
