@@ -30,6 +30,15 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// The client formats petition dates with `FmtDate(..., 'ls')`, which expects the
+// same 100-ns Windows filetime every other EVE timestamp uses, not an ISO string.
+const FILETIME_EPOCH_OFFSET_MS = 11644473600000;
+function toFileTime(iso) {
+  const ms = Date.parse(String(iso || ""));
+  if (!Number.isFinite(ms)) return 0;
+  return (ms + FILETIME_EPOCH_OFFSET_MS) * 10000;
+}
+
 function statePath() {
   return path.join(DATA_DIR, FILE_NAME);
 }
@@ -102,14 +111,14 @@ function buildRow(petition) {
     deleted: petition.deleted ? 1 : 0,
     updated: petition.updated ? 1 : 0,
     rateable: petition.closed && petition.petitionerID > 0 ? 1 : 0,
-    ratingDateTime: petition.ratingAt || null,
+    ratingDateTime: petition.ratingAt ? toFileTime(petition.ratingAt) : null,
     responseTimeRating: petition.ratings ? petition.ratings.responseTime : 0,
     helpfulnessRating: petition.ratings ? petition.ratings.helpfulness : 0,
     attitudeRating: petition.ratings ? petition.ratings.attitude : 0,
     comment: petition.ratings ? petition.ratings.comment : "",
     escalatesTo: petition.escalatesTo || 0,
-    createDate: petition.createDate,
-    lastUpdate: petition.lastUpdate,
+    createDate: toFileTime(petition.createDate),
+    lastUpdate: toFileTime(petition.lastUpdate),
     messageCount: messages.length,
   };
 }
@@ -246,7 +255,7 @@ function listMessages(petitionID, readerID) {
     message: message.text,
     text: message.text,
     comment: message.comment === true ? 1 : 0,
-    createDate: message.createDate,
+    createDate: toFileTime(message.createDate),
     unread: !(Array.isArray(message.readBy) && message.readBy.includes(positive(readerID))),
   }));
 }
@@ -266,7 +275,7 @@ function listUnread(characterID) {
         messageID: message.messageID,
         petitionID: record.petitionID,
         text: message.text,
-        createDate: message.createDate,
+        createDate: toFileTime(message.createDate),
       });
     }
   }
