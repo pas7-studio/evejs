@@ -5245,6 +5245,40 @@ function releaseStationIdleTarget({systemID,stationID,haulerID,scene=null}={}){
   return true;
  }catch(_error){return false;}
 }
+// Payroll: the corporation pays its own pilot out of its REAL corporation wallet so that a
+// purchase can settle at all. The market refuses a buy when the PILOT's earned balance is
+// short, and the treasury sweep leaves every pilot at 0 - measured 2026-10-31 the corporation
+// walled 1.45 billion ISK while no pilot could afford a 92 720 ISK blueprint.
+let payrollInstance=null;
+function pilotPayroll(){
+ if(payrollInstance)return payrollInstance;
+ try{
+  const gameStore=require("../gameStore");
+  const trader=ensureMarketTrader();
+  if(!trader||typeof trader.adjustEarned!=="function")return null;
+  payrollInstance=require("./coopPilotPayroll").createPilotPayroll({gameStore,
+   adjustEarned:args=>trader.adjustEarned(args),
+   journalFile:process.env.EVEJS_COOP_PAYROLL_JOURNAL||"/var/lib/evejs/coop-payroll-journal.json"});
+  return payrollInstance;
+ }catch(_error){return null;}
+}
+// One bounded salary per pilot, type and hour: a retry of the same attempt never pays twice,
+// and the wallet is only debited for what the pilot actually receives.
+const PAYROLL_SALARY_CENTS=10000000; // 100 000.00 ISK
+function payPilotForPurchase({pilotID,typeID,stationID,systemID}={}){
+ try{
+  const payroll=pilotPayroll();
+  if(!payroll)return {status:"PAYROLL_UNAVAILABLE"};
+  const hour=Math.floor(Date.now()/3600000);
+  const answer=payroll.pay({pilotID:String(pilotID),cents:PAYROLL_SALARY_CENTS,
+   reason:"purchase "+Number(typeID),eventID:"purchase:"+String(pilotID)+":"+Number(typeID)+":"+hour});
+  try{require("./coopRuntimeProbe").observe("living-npc-payroll",null,
+   {spaceState:{systemID:Number(systemID),stationID:Number(stationID)}},
+   {pilotID:String(pilotID),typeID:Number(typeID),status:String(answer&&answer.status||""),
+    isk:Number(answer&&answer.isk||0),walletAfter:Number(answer&&answer.walletAfter||0)});}catch(_error){}
+  return answer||{status:"NO_ANSWER"};
+ }catch(error){return {status:"PAYROLL_THREW",reason:String(error&&error.message||error).slice(0,80)};}
+}
 // Buying ONE unit of a seeded station stock (a blueprint, in practice) with the same trader and
 // the same identity registry the arrival sale uses. The co-op economy could never grow new
 // products because it owned four blueprints; the seeded world sells 2 772 of them, and this is
@@ -5261,10 +5295,24 @@ async function buyFromStationStock({systemID,stationID,typeID,haulerID,scene=nul
   .find(row=>Number(row.entityID)===Number(haulerID))||null;
  if(!link)return {status:"NO_IDENTITY_LINK"};
  try{
-  const answer=await trader.execute({scene:scene||require("./runtime").ensureScene(Number(systemID),
+  let answer=await trader.execute({scene:scene||require("./runtime").ensureScene(Number(systemID),
    {refreshStargates:false}),pilotID:link.pilotID,entityID:Number(haulerID),
    stationID:Number(stationID),side:"buy",typeID:Number(typeID),buyTypes:[Number(typeID)],sellTypes:[]},
    {withinBatch:false});
+  // The market settles a purchase out of the PILOT's earned balance, and the treasury sweep
+  // empties every pilot after each sale. Measured 2026-10-31: Miner I Blueprint bought for
+  // 92 720 ISK while every pilot stood at 0 and the corporation wallet held 1.45 billion - so
+  // the refusal is funded from the corporation's OWN wallet, never invented.
+  if(answer&&String(answer.status)==="INSUFFICIENT_EARNED_ISK"){
+   const paid=payPilotForPurchase({pilotID:link.pilotID,typeID:Number(typeID),
+    stationID:Number(stationID),systemID:Number(systemID),
+    balance:Number(answer.balance||0),price:Number(answer.price||0)});
+   if(paid&&paid.status==="PAID")
+    answer=await trader.execute({scene:scene||require("./runtime").ensureScene(Number(systemID),
+     {refreshStargates:false}),pilotID:link.pilotID,entityID:Number(haulerID),
+     stationID:Number(stationID),side:"buy",typeID:Number(typeID),buyTypes:[Number(typeID)],
+     sellTypes:[]},{withinBatch:false});
+  }
   try{require("./coopRuntimeProbe").observe("living-npc-blueprint-bought",null,null,
    {systemID:Number(systemID),stationID:Number(stationID),typeID:Number(typeID),
     haulerID:Number(haulerID),status:String(answer&&answer.status||"UNKNOWN"),
