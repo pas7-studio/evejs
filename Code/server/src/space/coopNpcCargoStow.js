@@ -30,6 +30,9 @@ const flightDistance = (a, b) => Math.sqrt((Number(a.x) - Number(b.x)) ** 2 +
 
 const DEFAULT_RANGE_M = 10000;
 const BLUEPRINT_CATEGORY_ID = 9;
+// A hold-to-shelf move and a shelf-to-hold move are two different records: one is keyed by the
+// cargo row it consumed, the other by the hangar row it will consume.
+const LIFT_TAG = "coop-cargo-lift";
 
 function rootOf() {
   return process.env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry";
@@ -44,6 +47,10 @@ function atomic(file, value) {
 
 function journalPath(root, cargoID) {
   return path.join(root, "stow", String(cargoID) + ".json");
+}
+
+function liftPath(root, itemID) {
+  return path.join(root, "lift", String(itemID) + ".json");
 }
 
 function readJournal(file) {
@@ -64,10 +71,10 @@ function createCargoStow({
 } = {}) {
   const hangarFlag = (items && items.ITEM_FLAGS && items.ITEM_FLAGS.HANGAR) || 4;
 
-  const note = (payload) => {
+  const note = (payload, event = "living-npc-cargo-stowed") => {
     try {
       if (probe && typeof probe.observe === "function")
-        probe.observe("living-npc-cargo-stowed", null, null, payload);
+        probe.observe(event, null, null, payload);
     } catch (_error) { /* telemetry never stops a stow */ }
   };
 
@@ -198,7 +205,113 @@ function createCargoStow({
       stowed, stationID: place.stationID};
   }
 
-  return {stow, where, stacks};
+  // The inverse of a stow: the corporation's own copy comes OFF the shelf and INTO the hold,
+  // so a hauling trip can carry it to the station that can use it. Measured 2026-10-31: the
+  // Reinforced Bulkheads I blueprint was bought and adopted in Jita while the only Tritanium
+  // the corporation owns sits at the factory in New Caldari - the recipe had its materials
+  // 1.5 million kilometres away, so the factory could never run it, whatever the price.
+  //
+  // It invents nothing: it removes one real hangar row and writes the same asset into the hold,
+  // with the intent recorded before the move and the outcome after it, so an interrupted copy
+  // is a record for the operator instead of a guess.
+  function lift({haulerID, stationID, typeID, quantity = 1} = {}) {
+    const place = where({haulerID, stationID});
+    if (place.status !== "ELIGIBLE") return place;
+    const owner = pos(ownerID);
+    if (!owner) return {status: "INVALID_OWNER"};
+    const wanted = pos(typeID);
+    if (!wanted) return {status: "INVALID_ARGUMENT"};
+    const sizeOf = (row) => {
+      const q = num(row && row.quantity);
+      if (q > 0) return q;
+      return Number(row && row.singleton) === 1 ? 1 : 0;
+    };
+    let rows = [];
+    try {
+      const answer = items.listOwnedItems(owner, {locationID: place.stationID});
+      rows = Array.isArray(answer) ? answer : (Array.isArray(answer && answer.data) ? answer.data : []);
+    } catch (_error) { return {status: "HANGAR_UNREADABLE"}; }
+    const stack = rows.filter((row) => Number(row.typeID) === wanted &&
+        (!pos(row.locationID) || pos(row.locationID) === place.stationID))
+      .sort((a, b) => sizeOf(b) - sizeOf(a))[0] || null;
+    const held = sizeOf(stack);
+    if (!stack || held < 1) return {status: "NOTHING_TO_LIFT", typeID: wanted};
+    const itemID = pos(stack.itemID);
+    if (!itemID) return {status: "HANGAR_ROW_WITHOUT_ID", typeID: wanted};
+    const move = Math.min(Math.max(1, Math.floor(num(quantity))), held);
+    const singleton = Number(stack.singleton) === 1 || held === 1;
+    const file = liftPath(root, itemID);
+    const prior = readJournal(file);
+    if (prior) {
+      // A lift that was written down is never repeated: the row may already be gone.
+      return {status: "JOURNAL_PENDING", phase: String(prior.phase || ""), itemID};
+    }
+    const after = held - move;
+    const tag = LIFT_TAG + ":" + [owner, place.haulerID, itemID].join("-");
+    const record = {version: 1, itemID, ownerID: owner, haulerID: place.haulerID,
+      stationID: place.stationID, systemID: place.systemID, typeID: wanted, quantity: move,
+      beforeQuantity: held, afterQuantity: after, singleton, cargoTag: tag,
+      phase: "MOVE_OUTCOME_UNKNOWN", at: now()};
+    atomic(file, record);
+    let debited = null;
+    try {
+      debited = after <= 0
+        ? items.removeInventoryItem(itemID, {removeContents: true})
+        : items.updateInventoryItem(itemID, (row) => ({...row, quantity: after,
+          stacksize: after, singleton: 0}));
+    } catch (error) {
+      debited = {success: false, errorMsg: String((error && error.message) || error)};
+    }
+    if (!debited || debited.success !== true) {
+      record.phase = "NEEDS_OPERATOR_REPAIR";
+      record.reason = "HANGAR_DEBIT_REFUSED";
+      atomic(file, record);
+      return {status: "HANGAR_DEBIT_FAILED", itemID};
+    }
+    let meta = null;
+    try { meta = resolveType ? resolveType(wanted) : null; } catch (_error) { meta = null; }
+    const native = store.getNativeEntity(place.haulerID) || {};
+    const allocated = typeof store.allocateCargoID === "function"
+      ? store.allocateCargoID({transient: false}) : null;
+    if (!allocated || allocated.success !== true || !pos(allocated.data)) {
+      record.phase = "NEEDS_OPERATOR_REPAIR";
+      record.reason = "CARGO_ID_ALLOCATION_FAILED";
+      atomic(file, record);
+      return {status: "CARGO_ID_ALLOCATION_FAILED", itemID};
+    }
+    const written = store.upsertNativeCargo({cargoID: pos(allocated.data),
+      entityID: place.haulerID, ownerID: pos(native.ownerID) || owner, moduleID: 0,
+      typeID: wanted, groupID: pos(meta && meta.groupID),
+      categoryID: pos(meta && meta.categoryID), itemName: String((meta && meta.name) || ""),
+      quantity: move, singleton: singleton === true, flagID: 5, customInfo: tag},
+      {transient: false});
+    if (!written || written.success !== true) {
+      record.phase = "NEEDS_OPERATOR_REPAIR";
+      record.reason = "NATIVE_CARGO_WRITE_FAILED";
+      atomic(file, record);
+      return {status: "NATIVE_CARGO_WRITE_FAILED", itemID};
+    }
+    const settled = (store.listNativeCargoForEntity(place.haulerID) || [])
+      .find((row) => String(row.customInfo || "") === tag);
+    if (!settled || num(settled.quantity) !== move) {
+      record.phase = "NEEDS_OPERATOR_REPAIR";
+      record.reason = "NATIVE_CARGO_UNVERIFIED";
+      atomic(file, record);
+      return {status: "NATIVE_CARGO_UNVERIFIED", itemID};
+    }
+    record.phase = "COMPLETED";
+    record.cargoID = pos(settled.cargoID);
+    record.completedAt = now();
+    atomic(file, record);
+    note({haulerID: place.haulerID, stationID: place.stationID, systemID: place.systemID,
+      typeID: wanted, quantity: move, cargoID: record.cargoID, status: "LIFTED",
+      name: String((meta && meta.name) || "")}, "living-npc-cargo-lifted");
+    return {status: "LIFTED", itemID, typeID: wanted, quantity: move, singleton,
+      cargoID: record.cargoID, stationID: place.stationID};
+  }
+
+  return {stow, lift, where, stacks};
 }
 
-module.exports = {createCargoStow, journalPath, DEFAULT_RANGE_M, BLUEPRINT_CATEGORY_ID};
+module.exports = {createCargoStow, journalPath, liftPath, DEFAULT_RANGE_M,
+  BLUEPRINT_CATEGORY_ID, LIFT_TAG};

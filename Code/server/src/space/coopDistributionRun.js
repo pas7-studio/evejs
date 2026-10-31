@@ -212,23 +212,36 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     // (measured 2026-10-31: Tritanium has no bid in Jita at all while the corporation needs
     // Pyerite and Mexallon that only Jita sells).
     const planImport = async () => {
-      let importing = null;
-      try {
-        importing = typeof authorities.importPlan === "function"
-          ? await authorities.importPlan({haulerID: id}) : null;
-      } catch (_error) { importing = {status: "IMPORT_PLAN_THREW"}; }
-      let row = importing && importing.status === "OK" ? importing.trip : null;
-      // Nothing missing is the moment to buy CAPITAL: a blueprint whose product pays for its
-      // own materials, at the station that sells it, carried home where the materials are.
-      if (!row && typeof authorities.blueprintPlan === "function") {
-        let capital = null;
+      // Our own capital first: a blueprint the corporation already owns at another station is
+      // dead weight until it reaches the factory, and moving it spends nothing. Measured
+      // 2026-10-31: the copy sat in Jita while the input trip kept buying Mexallon, so the one
+      // thing that would unlock a 1 M ISK product waited behind a shopping list.
+      let capital = null;
+      if (typeof authorities.blueprintPlan === "function") {
         try { capital = authorities.blueprintPlan({haulerID: id}); }
         catch (_error) { capital = null; }
-        row = capital && capital.status === "OK" ? capital.trip : null;
-        if (capital && capital.status === "OK")
-          note(observe, "living-distribution-blueprint-trip", { haulerID: id },
-            { reason: "PROFIT:" + num(capital.trip.profit) + " BUILDABLE:" +
-              num(capital.trip.buildable) });
+      }
+      const carryTrip = capital && capital.status === "OK" && capital.trip &&
+        capital.trip.carryOnly === true ? capital.trip : null;
+      let row = carryTrip;
+      if (carryTrip)
+        note(observe, "living-distribution-blueprint-carry", { haulerID: id },
+          { reason: "CARRY_HOME:" + pos(carryTrip.typeID) });
+      if (!row) {
+        let importing = null;
+        try {
+          importing = typeof authorities.importPlan === "function"
+            ? await authorities.importPlan({haulerID: id}) : null;
+        } catch (_error) { importing = {status: "IMPORT_PLAN_THREW"}; }
+        row = importing && importing.status === "OK" ? importing.trip : null;
+      }
+      // Nothing missing is the moment to buy CAPITAL: a blueprint whose product pays for its
+      // own materials, at the station that sells it, carried home where the materials are.
+      if (!row && capital && capital.status === "OK") {
+        row = capital.trip;
+        note(observe, "living-distribution-blueprint-trip", { haulerID: id },
+          { reason: "PROFIT:" + num(capital.trip.profit) + " BUILDABLE:" +
+            num(capital.trip.buildable) });
       }
       if (!row) return null;
       const seller = pos(row.toStationID);
@@ -254,6 +267,7 @@ async function tick(haulerID, authorities = {}, env = process.env) {
       }
       const importState = write({version: 1, haulerID: id, phase: importPhase, trip: row,
         mode: String(row.mode || "import"),
+        carryOnly: row.carryOnly === true,
         importTypes: [pos(row.typeID)].filter(Boolean),
         homeStationID: pos(row.homeStationID), homeSystemID: pos(row.homeSystemID),
         cycles: num(state && state.cycles), trips: 0,
@@ -492,7 +506,14 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   // loading station, what only belongs on a shelf (a blueprint bought in space) goes on the
   // shelf - independently of what the run is doing, because a run with no profitable trip
   // never reaches a LIFT step and would leave the asset in the hold for ever.
-  if (typeof authorities.stow === "function" && pos(state.fromStationID)) {
+  //
+  // BUT a shopping trip that has just bought something is CARRYING it home: measured
+  // 2026-10-31 a blueprint bought in Jita was shelved there on the very next beat, adopted at
+  // the wrong station, and the factory never saw it while the ISK was already spent.
+  const carryingPurchaseHome =
+    SHOPPING_MODES.has(String(state.mode)) && num(state.importBought) > 0;
+  if (!carryingPurchaseHome && typeof authorities.stow === "function" &&
+    pos(state.fromStationID)) {
     let near = null;
     try {
       near = typeof authorities.distanceTo === "function"
@@ -518,18 +539,39 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   // Import phase: buy what the factory lacks at the station that really sells it, bounded, then
   // go home where the hold stows into the hangar and the manufacturer can finally run.
   if (String(state.phase) === PHASE.SUPPLY && String(state.mode) === "blueprint" &&
-    typeof authorities.buyBlueprint === "function") {
+    (typeof authorities.buyBlueprint === "function" ||
+      typeof authorities.liftBlueprint === "function")) {
+    const carryOnly = state.carryOnly === true;
     let answer = null;
-    try {
-      answer = await authorities.buyBlueprint({ haulerID: id, stationID: pos(state.toStationID),
-        systemID: pos(state.toSystemID) });
-    } catch (_error) { answer = null; }
+    if (!carryOnly && typeof authorities.buyBlueprint === "function") {
+      try {
+        answer = await authorities.buyBlueprint({ haulerID: id, stationID: pos(state.toStationID),
+          systemID: pos(state.toSystemID) });
+      } catch (_error) { answer = null; }
+    }
     const bought = answer && answer.bought ? String(answer.bought.status) : "";
     const settled = bought === "TRADE_SETTLED";
+    // A settled purchase delivers the copy straight into the hold, so only a copy that is
+    // already on the shelf ("carry this home") has to be lifted. Never shelve it here: the
+    // whole point of the trip is that the factory, not the seller, holds the recipe.
+    let carried = null;
+    if (carryOnly && typeof authorities.liftBlueprint === "function") {
+      try {
+        carried = authorities.liftBlueprint({ haulerID: id, stationID: pos(state.toStationID),
+          typeID: pos(state.typeID) });
+      } catch (_error) { carried = null; }
+    }
+    const carriedStatus = String((carried && carried.status) || "");
+    const carriedOk = carriedStatus === "LIFTED";
+    const loaded = settled || carriedOk;
     const reason = settled ? "BLUEPRINT_BOUGHT:" + pos(state.typeID)
-      : "BLUEPRINT_BUY_FAILED:" + String(bought || (answer && answer.status) || "NO_ANSWER").slice(0, 40);
+      : carryOnly ? (carriedOk ? "BLUEPRINT_CARRIED:" + pos(state.typeID)
+        : "BLUEPRINT_CARRY_FAILED:" +
+          String(carriedStatus || "NO_LIFT_AUTHORITY").slice(0, 40))
+      : "BLUEPRINT_BUY_FAILED:" + String(bought || (answer && answer.status) ||
+        "NO_ANSWER").slice(0, 40);
     const home = write({ ...state, phase: PHASE.RETURN, supplyTries: 0, updatedAt: now,
-      importBought: settled ? Math.max(1, num(state.importBought)) : num(state.importBought),
+      importBought: loaded ? Math.max(1, num(state.importBought)) : num(state.importBought),
       lastReason: reason, crossAt: 0, stopWaits: 0,
       returnToSystemID: pos(state.homeSystemID) || pos(state.fromSystemID),
       returnStationID: pos(state.homeStationID) || pos(state.fromStationID) }, env);

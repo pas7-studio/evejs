@@ -20,6 +20,24 @@ function blueprintRecipe(manufacture, typeID) {
   blueprintRecipes.set(id, plan);
   return plan;
 }
+// A blueprint receipt is a record of a PHYSICAL copy at one station. When the copy travels,
+// the old receipt must stop claiming it, or the manufacturer would offer a recipe whose item
+// is not there. Nothing is deleted: the row keeps the history and says where the copy went.
+function markReceiptMoved({ownerID, stationID, typeID, movedTo, now = Date.now()}) {
+  try {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const dir = path.join(process.env.EVEJS_COOP_NPC_INDUSTRY_ROOT ||
+      "/var/lib/evejs/coop-native-industry", "blueprints");
+    const file = path.join(dir, ("seed:" + ownerID + ":" + stationID + ":" + typeID)
+      .replace(/:/g, "_") + ".json");
+    const prior = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!prior || String(prior.status) !== "SEEDED") return {status: "NOT_A_RECEIPT"};
+    fs.writeFileSync(file, JSON.stringify({...prior, status: "MOVED", movedTo: Number(movedTo) || 0,
+      movedAt: now}));
+    return {status: "MOVED"};
+  } catch (_error) { return {status: "NO_RECEIPT"}; }
+}
 const PHASES = ["refinery", "manufacture", "distribution", "distributionRun"];
 let distributionRunInFlight = false;
 let lastDistributionRunStatus = null;
@@ -479,12 +497,63 @@ function distributionRunAuthorities(options = {}) {
           const ownedRows = items.listOwnedItems(owner, {locationID: undefined});
           const ownedList = Array.isArray(ownedRows) ? ownedRows
             : (ownedRows && ownedRows.data) || [];
-          const owned = new Set(ownedList.filter((row) => Number(row.quantity) === -1)
+          const owned = new Set(ownedList.filter((row) => Number(row.categoryID) === 9 &&
+            (Number(row.quantity) > 0 || Number(row.singleton) === 1))
             .map((row) => Number(row.typeID)).filter(Boolean));
           const held = (typeID) => ownedList
             .filter((row) => Number(row.typeID) === Number(typeID) &&
               Number(row.locationID) === Number(home))
             .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+          // A blueprint the corporation already OWNS but keeps away from the factory is a
+          // hauling job, not a purchase. Measured 2026-10-31: the Reinforced Bulkheads copy was
+          // bought and adopted in Jita while the only station holding its 6 944 Tritanium per
+          // unit is the factory, so nothing could ever build it. The shelf-to-hold lift is the
+          // same journaled move the stow uses, in the other direction.
+          let carry = null;
+          for (const row of ownedList) {
+            const typeID = Number(row.typeID);
+            const source = Number(row.locationID);
+            if (!typeID || !source || source === Number(home)) continue;
+            const meta = inventory2.resolveItemByTypeID(typeID) || {};
+            if (Number(meta.categoryID) !== 9) continue;
+            const plan = blueprintRecipe(manufacture2, typeID);
+            if (!plan || plan.status !== "READY") continue;
+            const bid = demand.get(Number(plan.productTypeID));
+            if (!bid || !(bid.price > 0) || !(bid.volume > 0)) continue;
+            let runs = Infinity;
+            for (const material of plan.materials || []) {
+              runs = Math.min(runs, Math.floor(held(material.typeID) /
+                Math.max(1, Number(material.quantity))));
+            }
+            if (!Number.isFinite(runs) || runs < 1) continue;
+            const stationRow = worldData.getStationByID(source);
+            const systemID = Number(stationRow && stationRow.solarSystemID) || 0;
+            if (!systemID) continue;
+            const value = bid.price * Math.min(runs, bid.volume) *
+              Math.max(1, Number(plan.productPerRun) || 1);
+            if (!carry || value > carry.value)
+              carry = {value, typeID, stationID: source, systemID, buildable: Math.min(runs, bid.volume)};
+          }
+          if (carry) {
+            let carryGate = null;
+            if (carry.systemID !== here) {
+              const pair = require("./coopNpcGateTravel").connectedGates({
+                sourceSystemID: here, targetSystemID: carry.systemID,
+                sourceScene: sceneFor(here), getGate: (id) => worldData.getStargateByID(id)});
+              if (!pair || !pair[0]) return {status: "NO_RECIPROCAL_GATE",
+                toSystemID: carry.systemID};
+              carryGate = {sourceGateID: pair[0].sourceGateID,
+                destinationGateID: pair[0].destinationGateID,
+                sourceSystemID: here, destinationSystemID: carry.systemID};
+            }
+            return {status: "OK", trip: {mode: "blueprint", carryOnly: true,
+              blueprintTypeID: carry.typeID, typeID: carry.typeID, quantity: 0,
+              expectedIsk: 0, price: 0, buildable: carry.buildable,
+              fromStationID: carry.stationID, fromSystemID: carry.systemID,
+              toStationID: carry.stationID, toSystemID: carry.systemID,
+              homeStationID: Number(home), homeSystemID, gate: carryGate,
+              items: [{stationID: carry.stationID, typeID: carry.typeID, quantity: 0}]}};
+          }
           let best = null;
           for (const ask of asks) {
             const typeID = Number(ask.type_id);
@@ -699,6 +768,35 @@ function distributionRunAuthorities(options = {}) {
       },
       // Buying a blueprint is the only way the corporation can grow new products: it owned
       // four, the seeded world sells 2 772, and the native trader already matches seeded asks.
+      // A copy the corporation owns is only worth what it can build. Take it OFF this station's
+      // shelf and put it in the hold, through the journaled cargo authority, so the trip can
+      // carry it to the factory where its materials are.
+      liftBlueprint: ({haulerID, stationID, typeID}) => {
+        try {
+          const answer = require("./coopNpcCargoStow").createCargoStow({
+            store, items, sceneFor, getStation: (id) => worldData.getStationByID(id),
+            resolveType: (id) => inventory.resolveItemByTypeID(id),
+            ownerID: Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129),
+            root: env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry",
+            probe: require("./coopRuntimeProbe"),
+          }).lift({haulerID, stationID, typeID});
+          if (answer && answer.status === "LIFTED") {
+            const moved = markReceiptMoved({
+              ownerID: Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129),
+              stationID: Number(stationID), typeID: Number(typeID), movedTo: factoryStation()});
+            try {
+              require("./coopRuntimeProbe").observe("living-npc-blueprint-lifted", null, null,
+                {haulerID: Number(haulerID), stationID: Number(stationID),
+                 typeID: Number(typeID), status: "LIFTED",
+                 receipt: String((moved && moved.status) || "")});
+            } catch (_error) { /* telemetry only */ }
+          }
+          return answer;
+        } catch (error) {
+          return {status: "LIFT_THREW",
+            reason: String((error && error.message) || error).slice(0, 90)};
+        }
+      },
       buyBlueprint: async ({haulerID, stationID, systemID}) => {
         try {
           const inventory = require("../services/inventory/itemTypeRegistry");

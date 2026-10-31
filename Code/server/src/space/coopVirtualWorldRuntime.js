@@ -5295,20 +5295,31 @@ function pilotPayroll(){
   return payrollInstance;
  }catch(_error){return null;}
 }
-// One bounded salary per pilot, type and hour: a retry of the same attempt never pays twice,
-// and the wallet is only debited for what the pilot actually receives.
+// One bounded salary per pilot, type, hour and AMOUNT: a retry of the same attempt never pays
+// twice, and the wallet is only debited for what the pilot actually receives.
 const PAYROLL_SALARY_CENTS=10000000; // 100 000.00 ISK
-function payPilotForPurchase({pilotID,typeID,stationID,systemID}={}){
+// Measured 2026-10-31: a 175 000 ISK blueprint could never be bought, because every salary was
+// exactly 100 000 ISK and the shortfall was paid by the corporation again and again. The salary
+// is now what the purchase COSTS (plus a small margin), still bounded by the purchase budget.
+function payrollCentsForPrice(price){
+ const isk=Math.max(0,Number(price)||0);
+ const cents=Math.ceil(isk*100*1.02/100)*100; // whole ISK, 2 % over the ask
+ const cap=Math.max(PAYROLL_SALARY_CENTS,Number(process.env.EVEJS_COOP_PAYROLL_MAX_CENTS||500000000));
+ return Math.min(cap,Math.max(PAYROLL_SALARY_CENTS,cents));
+}
+function payPilotForPurchase({pilotID,typeID,stationID,systemID,price}={}){
  try{
   const payroll=pilotPayroll();
   if(!payroll)return {status:"PAYROLL_UNAVAILABLE"};
   const hour=Math.floor(Date.now()/3600000);
-  const answer=payroll.pay({pilotID:String(pilotID),cents:PAYROLL_SALARY_CENTS,
-   reason:"purchase "+Number(typeID),eventID:"purchase:"+String(pilotID)+":"+Number(typeID)+":"+hour});
+  const cents=payrollCentsForPrice(price);
+  const answer=payroll.pay({pilotID:String(pilotID),cents,
+   reason:"purchase "+Number(typeID),eventID:"purchase:"+String(pilotID)+":"+Number(typeID)+":"+hour+":"+cents});
   try{require("./coopRuntimeProbe").observe("living-npc-payroll",null,
    {spaceState:{systemID:Number(systemID),stationID:Number(stationID)}},
    {pilotID:String(pilotID),typeID:Number(typeID),status:String(answer&&answer.status||""),
-    isk:Number(answer&&answer.isk||0),walletAfter:Number(answer&&answer.walletAfter||0)});}catch(_error){}
+    isk:Number(answer&&answer.isk||0),walletAfter:Number(answer&&answer.walletAfter||0),
+    price:Number(price)||0});}catch(_error){}
   return answer||{status:"NO_ANSWER"};
  }catch(error){return {status:"PAYROLL_THREW",reason:String(error&&error.message||error).slice(0,80)};}
 }
@@ -5340,7 +5351,7 @@ async function buyFromStationStock({systemID,stationID,typeID,haulerID,scene=nul
    const paid=payPilotForPurchase({pilotID:link.pilotID,typeID:Number(typeID),
     stationID:Number(stationID),systemID:Number(systemID),
     balance:Number(answer.balance||0),price:Number(answer.price||0)});
-   if(paid&&paid.status==="PAID")
+   if(paid&&(paid.status==="PAID"||paid.status==="DUPLICATE"))
     answer=await trader.execute({scene:scene||require("./runtime").ensureScene(Number(systemID),
      {refreshStargates:false}),pilotID:link.pilotID,entityID:Number(haulerID),
      stationID:Number(stationID),side:"buy",typeID:Number(typeID),buyTypes:[Number(typeID)],
