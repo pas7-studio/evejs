@@ -5276,7 +5276,12 @@ function pilotPayroll(){
   if(!trader||typeof trader.adjustEarned!=="function")return null;
   payrollInstance=require("./coopPilotPayroll").createPilotPayroll({gameStore,
    adjustEarned:args=>trader.adjustEarned(args),
+   // The corporation wallet is owned by corporationRuntimeState, not by the `corporations`
+   // table: the atomic bridge refuses that table, which is why every salary was blocked.
+   corpWallet:require("./coopCorpWallet"),
    journalFile:process.env.EVEJS_COOP_PAYROLL_JOURNAL||"/var/lib/evejs/coop-payroll-journal.json"});
+  // Finish or report every salary that was left open by a crash, once, at first use.
+  try{payrollInstance.recover();}catch(_error){}
   return payrollInstance;
  }catch(_error){return null;}
 }

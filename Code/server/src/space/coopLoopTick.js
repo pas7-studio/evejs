@@ -61,12 +61,6 @@ function distributionRunAuthorities(options = {}) {
     // 2026-10-31: the merchant shipped every unit of Pyerite and Mexallon the factory needed,
     // so the hangar held 3.8 M Tritanium and the manufacturer answered
     // MATERIALS_MISSING 34:1324/3892702 35:481/0 36:119/0.
-    // The reserve is recomputed from disk and the book, so it is cached for two minutes per
-    // station: the same answer must not cost a recipe lookup and a SQL query every beat.
-    // What the corporation's OWN blueprints still need at a station is not freight. Measured
-    // 2026-10-31: the merchant shipped every unit of Pyerite and Mexallon the factory needed,
-    // so the hangar held 3.8 M Tritanium and the manufacturer answered
-    // MATERIALS_MISSING 34:1324/3892702 35:481/0 36:119/0.
     //
     // Only a blueprint whose product somebody really bids for reserves material: reserving for
     // every style the corporation owns would lock 12 562 Pyerite for ammunition no station in
@@ -117,11 +111,44 @@ function distributionRunAuthorities(options = {}) {
         }
         if (!wanted.length) return keep(null);
         const held = supply.heldAt({items, ownerID: owner, stationID: station});
-        const plan = supply.planSupply({blueprints: wanted, held, runs: num(env.EVEJS_COOP_INPUT_RUNS) || 2,
+        const plan = supply.planSupply({blueprints: wanted, held, runs: Number(env.EVEJS_COOP_INPUT_RUNS) || 2,
           maxTypes: 6, stationID: station,
           recipe: (blueprintTypeID, runs) => manufacture.recipe(blueprintTypeID, runs)});
         return keep({...plan, stationID: station, held});
       } catch (_error) { return keep(null); }
+    };
+    // Where the corporation's own factory really is: the explicit setting, or the station its
+    // blueprint receipts name most often. Measured 2026-10-31: the Miner I copy lives at
+    // 60000682, and every imported input has to come home to exactly that hangar.
+    const factoryStation = () => {
+      const configured = Number(env.EVEJS_COOP_INDUSTRY_STATION || 0) || 0;
+      if (configured) return configured;
+      try {
+        const owner = Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129);
+        const root = env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry";
+        const nodeFs = require("node:fs");
+        const nodePath = require("node:path");
+        const counts = new Map();
+        for (const name of nodeFs.readdirSync(nodePath.join(root, "blueprints"))) {
+          if (!name.endsWith(".json")) continue;
+          let row = null;
+          try { row = JSON.parse(nodeFs.readFileSync(nodePath.join(root, "blueprints", name), "utf8")); }
+          catch (_error) { continue; }
+          if (!row || String(row.status) !== "SEEDED" || Number(row.ownerID) !== owner) continue;
+          const station = Number(row.stationID) || 0;
+          if (station) counts.set(station, (counts.get(station) || 0) + 1);
+        }
+        return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 0;
+      } catch (_error) { return 0; }
+    };
+    // The one input worth BUYING. The refinery here only ever turns Veldspar into Tritanium
+    // (measured `refined 17471 -> 1 mineral`), so a Tritanium shortfall is mining's job -
+    // importing it would pay the Jita ask to undo the corporation's own ore. Pyerite, Mexallon
+    // and every higher mineral have no local source at all and must be shopped for.
+    const nextMissingInput = (plan) => {
+      const needs = plan && Array.isArray(plan.needs) ? plan.needs : [];
+      return needs.find((row) => row && Number(row.typeID) > 0 && Number(row.typeID) !== 34 &&
+        Number(row.short) > 0) || null;
     };
     // Keep the FULL requirement home, not only today's shortfall: once the hangar holds what the
     // factory needs, a shortfall-only reserve would let it all leave again on the next trip.
@@ -286,39 +313,99 @@ function distributionRunAuthorities(options = {}) {
           },
         });
       },
-      // The missing direction of the loop: a hold is not a warehouse. Anything bought in
-      // space (a blueprint) must reach the corporation hangar before it can be built or sold
-      // on. Bounded by the same physical station test the trader uses.
+      // A shopping trip: nothing worth CARRYING does not mean nothing worth doing. When the
+      // factory is short of an input this system cannot make, an EMPTY hull flies to the
+      // station that really sells it, buys, and carries it home. Measured 2026-10-31: the
+      // refinery here only ever saw Veldspar, so Pyerite and Mexallon never appear locally
+      // while Jita sells both one gate away.
+      importPlan: ({haulerID}) => {
+        try {
+          if (String(env.EVEJS_COOP_INPUT_IMPORT_TRIP || "0") !== "1")
+            return {status: "IMPORT_DISABLED"};
+          const home = factoryStation();
+          if (!home) return {status: "NO_FACTORY_STATION"};
+          const need = nextMissingInput(factorySupply(home));
+          if (!need) return {status: "NOTHING_TO_BUY"};
+          const native = store.getNativeEntity(haulerID);
+          const here = Number(native && native.systemID) || 0;
+          if (!here) return {status: "HULL_UNKNOWN"};
+          // A shopping trip needs ROOM, not an empty hold: measured 2026-10-31 three hulls were
+          // carrying ore no station in the region bids for, which is exactly why nothing was
+          // being manufactured. The trader sells a few units per trade, so a few cubic metres
+          // of free space is enough, and the cargo stays aboard for its own trip later.
+          const carried = store.listNativeCargoForEntity(haulerID) || [];
+          let usedM3 = 0;
+          for (const row of carried) {
+            const volume = Number(inventory.resolveItemByTypeID(Number(row.typeID))?.volume) || 0;
+            usedM3 += Math.max(0, Number(row.quantity) || 0) * volume;
+          }
+          const holdM3 = typeof capacityM3 === "function" ? Number(capacityM3(haulerID)) || 0 : 0;
+          if (holdM3 > 0 && holdM3 - usedM3 < 5) return {status: "HOLD_FULL"};
+          const db = openDb();
+          if (!db) return {status: "BOOK_UNAVAILABLE"};
+          // The hull's own system first, then the one gate away: a shopping trip is not a
+          // tour of the region.
+          const systems = [here];
+          try {
+            const scene = sceneFor(here);
+            for (const entity of (scene && Array.isArray(scene.staticEntities)
+              ? scene.staticEntities : [])) {
+              if (String(entity.kind) !== "stargate") continue;
+              const gate = worldData.getStargateByID(entity.itemID);
+              const destination = Number(gate && gate.destinationSolarSystemID) || 0;
+              if (destination && destination !== here && !systems.includes(destination))
+                systems.push(destination);
+            }
+          } catch (_error) { /* the hull's own system is still a candidate */ }
+          let best = null;
+          for (const systemID of systems) {
+            let row = null;
+            try {
+              row = db.prepare("select station_id, price, quantity from seed_stock " +
+                "where solar_system_id=? and type_id=? and quantity>0 " +
+                "order by price asc limit 1").get(Number(systemID), Number(need.typeID));
+            } catch (_error) { row = null; }
+            if (!row || !(Number(row.price) > 0)) continue;
+            const price = Number(row.price);
+            if (!best || price < best.price)
+              best = {price, stationID: Number(row.station_id), systemID};
+          }
+          if (!best) return {status: "NO_SELLER", typeID: Number(need.typeID)};
+          const homeStation = worldData.getStationByID(home);
+          const homeSystemID = Number(homeStation && homeStation.solarSystemID) || 0;
+          let gate = null;
+          if (best.systemID !== here) {
+            const pair = require("./coopNpcGateTravel").connectedGates({
+              sourceSystemID: here, targetSystemID: best.systemID,
+              sourceScene: sceneFor(here), getGate: (id) => worldData.getStargateByID(id)});
+            if (!pair || !pair[0]) return {status: "NO_RECIPROCAL_GATE",
+              typeID: Number(need.typeID), toSystemID: best.systemID};
+            gate = {sourceGateID: pair[0].sourceGateID,
+              destinationGateID: pair[0].destinationGateID,
+              sourceSystemID: here, destinationSystemID: best.systemID};
+          }
+          return {status: "OK", trip: {mode: "import", typeID: Number(need.typeID),
+            quantity: 0, expectedIsk: 0, price: best.price,
+            fromStationID: best.stationID, fromSystemID: best.systemID,
+            toStationID: best.stationID, toSystemID: best.systemID,
+            homeStationID: Number(home), homeSystemID, gate,
+            items: [{stationID: best.stationID, typeID: Number(need.typeID), quantity: 0}]}};
+        } catch (error) {
+          return {status: "IMPORT_PLAN_THREW",
+            reason: String((error && error.message) || error).slice(0, 80)};
+        }
+      },
       // Import what this system cannot produce. The refinery here only sees Veldspar
       // (`refined 17471 -> 1 mineral`), so Pyerite and Mexallon exist only at a station that
       // really sells them; a hull standing there with an empty hold is the ship that carries
       // them home, where they stow into the factory hangar.
       buyInputs: async ({haulerID, stationID, systemID}) => {
         try {
-          const owner = Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129);
-          let home = Number(env.EVEJS_COOP_INDUSTRY_STATION || 0) || 0;
-          if (!home) {
-            const nodeFs = require("node:fs");
-            const nodePath = require("node:path");
-            const root = env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry";
-            const counts = new Map();
-            try {
-              for (const name of nodeFs.readdirSync(nodePath.join(root, "blueprints"))) {
-                if (!name.endsWith(".json")) continue;
-                let row = null;
-                try { row = JSON.parse(nodeFs.readFileSync(nodePath.join(root, "blueprints", name), "utf8")); }
-                catch (_error) { continue; }
-                if (!row || String(row.status) !== "SEEDED" || Number(row.ownerID) !== owner) continue;
-                const station = Number(row.stationID) || 0;
-                if (station) counts.set(station, (counts.get(station) || 0) + 1);
-              }
-            } catch (_error) { /* no receipts is no factory */ }
-            home = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 0;
-          }
+          const home = factoryStation();
           if (!home) return {status: "NO_FACTORY_STATION"};
           if (Number(home) === Number(stationID)) return {status: "NOTHING_TO_BUY"};
           const plan = factorySupply(home);
-          const need = (plan && Array.isArray(plan.needs) ? plan.needs : [])[0] || null;
+          const need = nextMissingInput(plan);
           if (!need) return {status: "NOTHING_TO_BUY"};
           const answer = await require("./coopVirtualWorldRuntime").buyFromStationStock({
             systemID: Number(systemID), stationID: Number(stationID), typeID: Number(need.typeID),
@@ -339,7 +426,7 @@ function distributionRunAuthorities(options = {}) {
           return {status: "BUY_THREW", reason: String(error && error.message || error).slice(0, 80)};
         }
       },
-      stow: ({haulerID, stationID, categoryID}) => {
+      stow: ({haulerID, stationID, categoryID, types}) => {
         try {
           return require("./coopNpcCargoStow").createCargoStow({
             store, items, sceneFor, getStation: (id) => worldData.getStationByID(id),
@@ -347,7 +434,7 @@ function distributionRunAuthorities(options = {}) {
             ownerID: Number(env.EVEJS_COOP_FACTORY_CORP_ID || 1000129),
             root: env.EVEJS_COOP_NPC_INDUSTRY_ROOT || "/var/lib/evejs/coop-native-industry",
             probe: require("./coopRuntimeProbe"),
-          }).stow({haulerID, stationID, categoryID});
+          }).stow({haulerID, stationID, categoryID, types});
         } catch (error) {
           return {status: "STOW_THREW", reason: String(error && error.message || error).slice(0, 90)};
         }

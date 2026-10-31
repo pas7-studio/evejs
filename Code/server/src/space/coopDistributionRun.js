@@ -203,6 +203,59 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   const planned = decide(state, {});
   // A run in PLAN (a fresh one, or one that just came home) is planned here, once per beat.
   if (!state || String(state.phase || PHASE.PLAN) === PHASE.PLAN) {
+    // A shopping trip: nothing worth CARRYING is not nothing worth doing. The factory may
+    // simply lack an input this system cannot make, and then an empty hull flying to the
+    // station that really sells it is real work even when the freight book pays nothing
+    // (measured 2026-10-31: Tritanium has no bid in Jita at all while the corporation needs
+    // Pyerite and Mexallon that only Jita sells).
+    const planImport = async () => {
+      let importing = null;
+      try {
+        importing = typeof authorities.importPlan === "function"
+          ? await authorities.importPlan({haulerID: id}) : null;
+      } catch (_error) { importing = {status: "IMPORT_PLAN_THREW"}; }
+      const row = importing && importing.status === "OK" ? importing.trip : null;
+      if (!row) return null;
+      const seller = pos(row.toStationID);
+      const sellerSystem = pos(row.toSystemID);
+      if (!seller || !sellerSystem) return {status: "IMPORT_PLAN_INVALID"};
+      // A seller in another system is crossed FIRST: the ordinary TO_ORIGIN leg assumes the
+      // hull is already in the stop system, and a hull one gate away would wait there for
+      // ever. Measured 2026-10-31: the factory is in New Caldari, the seller is Jita 4-4.
+      let importPhase = PHASE.TO_ORIGIN;
+      let importReason = "PLANNED_IMPORT:" + pos(row.typeID);
+      if (row.gate) {
+        let crossing = null;
+        try {
+          crossing = typeof authorities.planCrossing === "function"
+            ? authorities.planCrossing({haulerID: id, gate: row.gate}) : null;
+        } catch (error) { crossing = {status: "CROSSING_PLAN_THREW"}; }
+        const plannedOk = Boolean(crossing && (crossing.status === "PLANNED" ||
+          crossing.status === "ALREADY_PENDING"));
+        if (plannedOk) {
+          importPhase = PHASE.CROSS;
+          importReason = "IMPORT_CROSSING:" + sellerSystem;
+        }
+      }
+      const importState = write({version: 1, haulerID: id, phase: importPhase, trip: row,
+        mode: "import", importTypes: [pos(row.typeID)].filter(Boolean),
+        homeStationID: pos(row.homeStationID), homeSystemID: pos(row.homeSystemID),
+        cycles: num(state && state.cycles), trips: 0,
+        stops: [{stationID: seller, items: []}], stopIndex: 0, loadedStops: [],
+        fromStationID: seller, fromSystemID: sellerSystem,
+        toStationID: seller, toSystemID: sellerSystem,
+        typeID: pos(row.typeID), quantity: 0, expectedIsk: 0,
+        gate: row.gate || null, sellCalls: 0, isk: 0,
+        lastReason: importReason, updatedAt: now}, env);
+      note(observe, "living-distribution-run", importState, {reason: importState.lastReason});
+      return {status: "PLANNED_IMPORT", state: importState};
+    };
+    // A hull that just found every stop empty has already proved the freight book is stale:
+    // ask for a shopping trip FIRST instead of walking the same empty route again.
+    if (state && state.forceImport === true) {
+      const forced = await planImport();
+      if (forced) return forced;
+    }
     // Nothing planned yet: planning is the authority's job and it must be real.
     if (typeof authorities.planTrip !== "function") return { status: "NO_PLANNER" };
     let trip = null;
@@ -211,6 +264,8 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     catch (error) { trip = { status: "PLAN_THREW", reason: String((error && error.message) || error).slice(0, 80) }; }
     if (!trip || trip.status !== "OK" || !trip.trip) {
       const why = String((trip && (trip.status || trip.reason)) || "NO_TRIP");
+      const imported = await planImport();
+      if (imported) return imported;
       // No freight HERE is not the end of the work: the corporation may keep its stock in the
       // next system over. Reposition there (the return leg already knows how) and plan again.
       let home = 0;
@@ -396,13 +451,26 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     return { status: "RESTED", state: fresh };
   }
   if (String(state.phase) === PHASE.BLOCKED && num(state.retries) < 2 &&
-    num(state.blockedAt) > 0 && now - num(state.blockedAt) > BLOCKED_RETRY_MS &&
-    typeof authorities.cargoUnits === "function" && Number(authorities.cargoUnits(id)) > 0) {
-    const again = write({ ...state, phase: PHASE.SELL, updatedAt: now, sellCalls: 0,
-      pendingSince: 0, retries: num(state.retries) + 1,
-      lastReason: "RETRY_AFTER_COOLDOWN" }, env);
-    note(observe, "living-distribution-run", again, { reason: again.lastReason });
-    return { status: "RETRYING", state: again };
+    num(state.blockedAt) > 0 && now - num(state.blockedAt) > BLOCKED_RETRY_MS) {
+    const aboard = typeof authorities.cargoUnits === "function"
+      ? Number(authorities.cargoUnits(id)) || 0 : 0;
+    if (aboard > 0) {
+      const again = write({ ...state, phase: PHASE.SELL, updatedAt: now, sellCalls: 0,
+        pendingSince: 0, retries: num(state.retries) + 1,
+        lastReason: "RETRY_AFTER_COOLDOWN" }, env);
+      note(observe, "living-distribution-run", again, { reason: again.lastReason });
+      return { status: "RETRYING", state: again };
+    }
+    // An EMPTY blocked hull is not waiting on a sale: measured 2026-10-31 the only empty
+    // hull was blocked NO_CARGO_AT_ANY_STOP at 15:02 and could never retry, because the old
+    // retry required cargo. It is exactly the ship a shopping trip needs.
+    if (typeof authorities.importPlan === "function") {
+      const again = write({ version: 1, haulerID: id, phase: PHASE.PLAN, updatedAt: now,
+        trips: num(state.trips), isk: num(state.isk), forceImport: true,
+        retries: num(state.retries) + 1, lastReason: "RETRY_EMPTY_AFTER_COOLDOWN" }, env);
+      note(observe, "living-distribution-run", again, { reason: again.lastReason });
+      return { status: "RETRYING", state: again };
+    }
   }
   // A hold is not a warehouse. Whenever this hull is physically at the corporation's own
   // loading station, what only belongs on a shelf (a blueprint bought in space) goes on the
@@ -443,6 +511,7 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     const tries = num(state.supplyTries) + 1;
     if ((status === "BOUGHT" || status === "COOLDOWN") && tries < MAX_SUPPLY_TRIES) {
       const waiting = write({ ...state, phase: PHASE.SUPPLY, supplyTries: tries, updatedAt: now,
+        importBought: num(state.importBought) + (status === "BOUGHT" ? num(answer.quantity) : 0),
         lastReason: status === "BOUGHT"
           ? "SUPPLIED:" + num(answer.typeID) + "x" + num(answer.quantity)
           : "SUPPLY_COOLDOWN" }, env);
@@ -452,11 +521,13 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     const reason = status === "BOUGHT" || status === "NOTHING_TO_BUY" || status === "COOLDOWN"
       ? "SUPPLIED_ALL" : "SUPPLY_STOPPED:" + status.slice(0, 40);
     const home = write({ ...state, phase: PHASE.RETURN, supplyTries: 0, updatedAt: now,
-      lastReason: reason, crossAt: 0, returnToSystemID: pos(state.fromSystemID),
-      returnStationID: pos(state.fromStationID) }, env);
+      lastReason: reason, crossAt: 0, stopWaits: 0,
+      returnToSystemID: pos(state.homeSystemID) || pos(state.fromSystemID),
+      returnStationID: pos(state.homeStationID) || pos(state.fromStationID) }, env);
     note(observe, "living-distribution-run", home, { reason });
     return { status: "RETURN", reason, state: home };
-  }  const step = decide(state, facts);
+  }
+  const step = decide(state, facts);
   const finish = (phase, reason, extra = {}) => {
     const stamp = phase === PHASE.BLOCKED ? { blockedAt: now } : {};
     const next = write({ ...state, ...stamp, ...extra, phase, lastReason: reason, updatedAt: now }, env);
@@ -501,6 +572,20 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   }
 
   if (step.action === "LIFT") {
+    // A shopping trip loads nothing: the hold leaves empty and comes home with inputs.
+    if (String(state.mode) === "import") {
+      if (!state.gate) return finish(PHASE.TO_DEST, "IMPORT_FLYING");
+      let crossing = null;
+      try {
+        crossing = typeof authorities.planCrossing === "function"
+          ? authorities.planCrossing({haulerID: id, gate: state.gate}) : null;
+      } catch (error) { crossing = {status: "CROSSING_PLAN_THREW"}; }
+      const plannedOk = Boolean(crossing && (crossing.status === "PLANNED" ||
+        crossing.status === "ALREADY_PENDING"));
+      if (!plannedOk) return finish(PHASE.BLOCKED, "CROSSING_" +
+        String((crossing && (crossing.status || crossing.reason)) || "UNPLANNED"));
+      return finish(PHASE.CROSS, "IMPORT_CROSSING");
+    }
     if (typeof authorities.lift !== "function") return { status: "NO_LIFT" };
     // A hold is not a warehouse. Anything the corporation bought in space (the measured case:
     // the Miner I Blueprint bought for 92 720 ISK on 2026-10-31) has to reach the hangar before
@@ -563,7 +648,19 @@ async function tick(haulerID, authorities = {}, env = process.env) {
       // Nothing left to load anywhere: if the hull carries anything at all, fly and sell it.
       const aboard = typeof authorities.cargoUnits === "function" ? authorities.cargoUnits(id) : 0;
       if (!(Number(aboard) > 0)) {
-        return finish(PHASE.BLOCKED, "NO_CARGO_AT_ANY_STOP", {skippedStops});
+        // An empty hull that found nothing to load is not broken: it is exactly the ship a
+        // shopping trip needs. Plan again with the import FIRST, but bound the retries so a
+        // stale book cannot walk the same empty route for ever.
+        const importCycles = num(state.importCycles) + 1;
+        if (typeof authorities.importPlan === "function" && importCycles <= 2) {
+          const fresh = { version: 1, haulerID: id, phase: PHASE.PLAN, updatedAt: now,
+            trips: num(state.trips), isk: num(state.isk), importCycles, forceImport: true,
+            lastReason: "NO_CARGO_AT_ANY_STOP" };
+          write(fresh, env);
+          note(observe, "living-distribution-run", fresh, {reason: fresh.lastReason});
+          return { status: "REPLANNING", state: fresh };
+        }
+        return finish(PHASE.BLOCKED, "NO_CARGO_AT_ANY_STOP", {skippedStops, importCycles});
       }
       let crossing = null;
       try {
@@ -613,6 +710,9 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   if (step.action === "TO_DEST") return finish(PHASE.TO_DEST, "CROSSED");
 
   if (step.action === "SELL") {
+    // A shopping trip is AT the seller's station: buy, never sell.
+    if (String(state.mode) === "import")
+      return finish(PHASE.SUPPLY, "IMPORT_READY", {sellCalls: 0, supplyTries: 0});
     // The empty hold is proof enough and needs no market at all, so it is asked FIRST.
     const held = typeof authorities.cargoUnits === "function" ? authorities.cargoUnits(id) : null;
     if (Number.isFinite(held) && held === 0 && (num(state.quantity) > 0 || num(state.isk) > 0)) {
@@ -778,6 +878,66 @@ async function tick(haulerID, authorities = {}, env = process.env) {
   }
 
   if (step.action === "REPLAN") {
+    // A shopping trip is not finished when it merely reaches the home SYSTEM: the material
+    // has to be in the hangar, or the factory keeps answering MATERIALS_MISSING while the
+    // minerals sit in a hold. Fly the last in-system leg and unload what this trip bought.
+    if (String(state.mode) === "import" && pos(state.returnStationID)) {
+      const gap = typeof authorities.distanceTo === "function"
+        ? authorities.distanceTo(pos(state.returnStationID), pos(state.returnToSystemID), id)
+        : null;
+      if (Number.isFinite(gap) && gap > STATION_RANGE_M) {
+        const waits = num(state.stopWaits) + 1;
+        if (waits >= MAX_STOP_WAITS)
+          return finish(PHASE.BLOCKED, "STALLED_AT_STOP:" + state.returnStationID,
+            { stopWaits: waits, distanceM: gap });
+        let flying = false;
+        try {
+          flying = typeof authorities.goTo === "function" &&
+            authorities.goTo(pos(state.returnStationID), id) === true;
+        } catch (_error) { flying = false; }
+        const next = write({ ...state, stopWaits: waits, updatedAt: now,
+          lastReason: flying ? "IMPORT_FLYING_HOME" : "IMPORT_HOME_UNREACHABLE" }, env);
+        note(observe, "living-distribution-run", next, { reason: next.lastReason });
+        return { status: "IMPORT_HOME", state: next };
+      }
+      // Nothing bought is nothing to unload: a shopping trip that was refused for lack of
+      // money must come home and plan again, not report UNLOAD_FAILED five times.
+      if (num(state.importBought) <= 0) {
+        const empty = { version: 1, haulerID: id, phase: PHASE.PLAN, updatedAt: now,
+          trips: num(state.trips), isk: num(state.isk), lastReason: "NO_IMPORT_TO_UNLOAD" };
+        write(empty, env);
+        note(observe, "living-distribution-run", empty, { reason: empty.lastReason });
+        return { status: "REPLANNING", state: empty };
+      }
+      let unloaded = null;
+      try {
+        unloaded = typeof authorities.stow === "function"
+          ? authorities.stow({ haulerID: id, stationID: pos(state.returnStationID),
+              types: Array.isArray(state.importTypes) ? state.importTypes : null }) : null;
+      } catch (_error) { unloaded = null; }
+      const moved = unloaded && Array.isArray(unloaded.stowed)
+        ? unloaded.stowed.filter((row) => row.status === "STOWED") : [];
+      if (moved.length) note(observe, "living-distribution-run", state,
+        { reason: "UNLOADED:" + moved.map((row) => row.typeID).join(",") });
+      else if (unloaded && unloaded.status && unloaded.status !== "NOTHING_TO_STOW")
+        note(observe, "living-distribution-stow", state,
+          { reason: String(unloaded.status).slice(0, 60), stationID: pos(state.returnStationID) });
+      // A hold that refuses to empty must be reported, not retried for ever while the
+      // factory waits for it.
+      const unloadTries = num(state.unloadTries) + 1;
+      if (!moved.length && unloadTries < 5) {
+        const next = write({ ...state, unloadTries, updatedAt: now,
+          lastReason: "UNLOAD_FAILED:" + String((unloaded && unloaded.status) || "NO_ANSWER") }, env);
+        note(observe, "living-distribution-run", next, { reason: next.lastReason });
+        return { status: "UNLOAD_FAILED", state: next };
+      }
+      const freshImport = { version: 1, haulerID: id, phase: PHASE.PLAN, updatedAt: now,
+        trips: num(state.trips), isk: num(state.isk),
+        lastReason: moved.length ? "UNLOADED_AT_FACTORY" : "UNLOAD_GAVE_UP" };
+      write(freshImport, env);
+      note(observe, "living-distribution-run", freshImport, { reason: freshImport.lastReason });
+      return { status: "REPLANNING", state: freshImport };
+    }
     // The next beat plans a new trip; only the identity of the run survives.
     const fresh = { version: 1, haulerID: id, phase: PHASE.PLAN, updatedAt: now,
       trips: num(state.trips), isk: num(state.isk), lastReason: "HOME_AGAIN" };
