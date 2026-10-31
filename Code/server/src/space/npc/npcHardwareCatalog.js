@@ -189,6 +189,11 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
       20927,
       17648,
       41328,
+      // FW-133: same omission - the doctrine loads real hybrid charges.
+      222,
+      230,
+      238,
+      235,
     ]),
     utilityTypeIDs: Object.freeze([
       527,
@@ -236,6 +241,12 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
       20799,
       17670,
       17678,
+      // FW-133 (measured 2026-10-31T15:45:10Z): the co-op war doctrine loads real EMP
+      // charges, and the family listed only the NPC-entity variants, so every Angel hull
+      // answered NPC_NATIVE_HARDWARE_CHARGE_POLICY_VIOLATION and the front never mustered.
+      185,
+      193,
+      201,
     ]),
     // FW-126 (measured 2026-10-31): every pirate family listed its tackle modules
     // (448 scrambler, 527 web, 3244 disruptor) only under utilityTypeIDs, so a module
