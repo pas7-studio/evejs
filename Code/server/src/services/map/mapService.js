@@ -417,9 +417,15 @@ function buildIndustryCostIndexDict(activityID) {
 // (system, dungeon) with the real template name and the highest difficulty
 // seen - never from a static table that could disagree with the world.
 const DEADSPACE_DIFFICULTY_MAX = 5;
+// The rows are cheap but not free (one template lookup per instance, ~0.8 s cold), and the map asks
+// again on every star-mode switch, so a short cache keeps the client's map responsive.
+const DEADSPACE_CACHE_MS = 15000;
+const deadspaceCache = new Map();
 
 function listDeadspaceRows(options = {}) {
   const origin = String(options && options.origin || "").trim();
+  const cached = deadspaceCache.get(origin);
+  if (cached && Date.now() - cached.at < DEADSPACE_CACHE_MS) return cached.rows.map((row) => [...row]);
   let state = null;
   let authority = null;
   try {
@@ -467,7 +473,9 @@ function listDeadspaceRows(options = {}) {
     }
     byKey.set(key, [solarSystemID, dungeonID, difficulty, name]);
   }
-  return [...byKey.values()].sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  const rows = [...byKey.values()].sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  deadspaceCache.set(origin, { at: Date.now(), rows });
+  return rows.map((row) => [...row]);
 }
 
 class MapService extends BaseService {
