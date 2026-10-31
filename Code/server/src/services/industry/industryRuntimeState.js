@@ -77,6 +77,11 @@ const {
   throwWrappedUserError,
 } = require(path.join(__dirname, "../../common/machoErrors"));
 const {
+  isSameMonitor,
+  canDisconnect,
+  isAttributableMonitor,
+} = require(path.join(__dirname, "./industryMonitorOwnership"));
+const {
   currentFileTime,
 } = require(path.join(__dirname, "../_shared/serviceHelpers"));
 const {
@@ -252,6 +257,16 @@ function ensureRuntimeTable() {
   });
   if (!payload.monitors || typeof payload.monitors !== "object") {
     payload.monitors = {};
+  }
+  // COOP_MONITOR_OWNER_V1: rows written before an owner was stamped can never be
+  // attributed to a character, and keeping them would leave unattributable ids
+  // that no client can detach. Drop them on load; the client re-connects a live
+  // job in one call.
+  for (const key of Object.keys(payload.monitors)) {
+    const monitor = payload.monitors[key];
+    if (!isAttributableMonitor(monitor)) {
+      delete payload.monitors[key];
+    }
   }
   payload._meta = payload._meta && typeof payload._meta === "object" ? payload._meta : {};
   payload._meta.nextMonitorID = Math.max(MONITOR_ID_START, toInt(payload._meta.nextMonitorID, MONITOR_ID_START));
@@ -2232,18 +2247,43 @@ function resolveMonitorAvailableMaterials(session, request) {
   return resolveAvailableMaterials(ownerID, inputLocation);
 }
 
+// COOP_MONITOR_OWNER_V1: a monitor is created by one character and only that
+// character may detach it. Before this, `IndustryMonitor.DisconnectJob` deleted
+// whatever id it was given (no session was even passed in), so the row carried no
+// owner and any client could detach another character's tracked job. The rules
+// themselves live in industryMonitorOwnership.js so they are testable.
 function connectMonitor(session, requestInput) {
   const request =
     requestInput && requestInput.rawRequest
       ? requestInput
       : parseIndustryRequest(requestInput);
+  const characterID = toInt(session && session.characterID, 0);
+  const activityID = toInt(request.activityID, 0);
+  const blueprintID = toInt(request.blueprintID, 0);
   const runtimeTable = ensureRuntimeTable();
+  const existing = Object.values(runtimeTable.monitors).find((monitor) =>
+    isSameMonitor(monitor, { characterID, activityID, blueprintID }),
+  );
+  if (existing) {
+    // Re-connecting the same blueprint must not leak a second row or a new id:
+    // the client keeps one monitor per tracked job.
+    return {
+      success: true,
+      data: {
+        monitorID: toInt(existing.monitorID, 0),
+        characterID,
+        reused: true,
+        availableMaterials: resolveMonitorAvailableMaterials(session, request),
+      },
+    };
+  }
   const monitorID = Math.max(MONITOR_ID_START, toInt(runtimeTable._meta.nextMonitorID, MONITOR_ID_START));
   runtimeTable._meta.nextMonitorID = monitorID + 1;
   runtimeTable.monitors[String(monitorID)] = {
     monitorID,
-    activityID: toInt(request.activityID, 0),
-    blueprintID: toInt(request.blueprintID, 0),
+    characterID,
+    activityID,
+    blueprintID,
     createdAt: Date.now(),
   };
   persistRuntimeTable(runtimeTable);
@@ -2251,17 +2291,35 @@ function connectMonitor(session, requestInput) {
     success: true,
     data: {
       monitorID,
+      characterID,
+      reused: false,
       availableMaterials: resolveMonitorAvailableMaterials(session, request),
     },
   };
 }
 
-function disconnectMonitor(monitorID) {
+function disconnectMonitor(monitorID, session) {
   const runtimeTable = ensureRuntimeTable();
-  delete runtimeTable.monitors[String(toInt(monitorID, 0))];
+  const key = String(toInt(monitorID, 0));
+  const monitor = runtimeTable.monitors[key];
+  if (!monitor) {
+    return {
+      success: false,
+      errorMsg: "MONITOR_NOT_FOUND",
+    };
+  }
+  const characterID = toInt(session && session.characterID, 0);
+  if (!canDisconnect(monitor, characterID)) {
+    return {
+      success: false,
+      errorMsg: "MONITOR_NOT_OWNED",
+    };
+  }
+  delete runtimeTable.monitors[key];
   persistRuntimeTable(runtimeTable);
   return {
     success: true,
+    data: { monitorID: toInt(monitorID, 0), characterID },
   };
 }
 

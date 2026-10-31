@@ -9,6 +9,9 @@ const {
   connectMonitor,
   disconnectMonitor,
 } = require(path.join(__dirname, "./industryRuntimeState"));
+const {
+  throwWrappedUserError,
+} = require(path.join(__dirname, "../../common/machoErrors"));
 
 class IndustryMonitorService extends BaseService {
   constructor() {
@@ -24,9 +27,14 @@ class IndustryMonitorService extends BaseService {
     ];
   }
 
-  Handle_DisconnectJob(args) {
+  Handle_DisconnectJob(args, session) {
     const monitorID = args && args.length > 0 ? args[0] : null;
-    disconnectMonitor(monitorID);
+    const result = disconnectMonitor(monitorID, session);
+    if (!result.success) {
+      throwWrappedUserError("CustomNotify", {
+        notify: "That industry monitor could not be detached.",
+      });
+    }
     return null;
   }
 }
