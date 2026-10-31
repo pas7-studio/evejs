@@ -36,7 +36,21 @@ function verifyStockKill({scene,victim,wreck,options={},links=[],fleets=[]}={}){
   return {status:"NAMED_VICTIM_USE_STANDARD_PROOF"};
  const attackerLinks=links.filter(l=>named(l?.pilotID)&&
   Number(l.entityID)===attackerID&&l.role==="pirate");
- if(attackerLinks.length!==1)return {status:"NOT_UNIQUE_NAMED_PIRATE"};
+ if(attackerLinks.length!==1){
+  // FW-135: a NAMED war hull that killed a stock mining-fleet hull is not an
+  // ambiguous pirate. Measured 16:30:10Z and 16:30:44Z: entity 980000087712
+  // (one fleet-registry link, role "patrol") killed stock 980000087715 and this
+  // path answered NOT_UNIQUE_NAMED_PIRATE, which reads like a broken identity
+  // merge and sent three audits after a phantom. The raid path belongs to a
+  // pirate-role hull; anything else is a real but unpaid kill, and it says so.
+  const namedLinks=links.filter(l=>named(l?.pilotID)&&
+   Number(l.entityID)===attackerID);
+  if(namedLinks.length===1)
+   return {status:"ATTACKER_NOT_A_RAID_PIRATE",attackerEntityID:attackerID,
+    systemID,attackerPilotID:String(namedLinks[0].pilotID),
+    attackerRoles:namedLinks.map(l=>String(l.role||""))};
+  return {status:"NOT_UNIQUE_NAMED_PIRATE"};
+ }
  const stock=[];
  for(const fleet of fleets){
   if(Number(fleet?.systemID)!==systemID)continue;

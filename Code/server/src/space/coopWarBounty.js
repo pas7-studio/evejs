@@ -184,8 +184,14 @@ function createWarBounty({gameStore, treasury, chest, readWarState, readLinks,
     busy = true;
     try {
       const proof = key(proofID) ? proofID : String(kind || "event") + ":" + campaign;
+      const kindKey = String(kind || "event").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 32);
       const paid = treasury.execute({type: "PAYOUT",
-        eventID: "fw:bounty:" + campaign + ":" + proof,
+        // FW-135: one wreck legitimately pays TWICE - the killer's warship-kill bounty
+        // and the fallen pilot's force-lost death benefit, from two different faction
+        // wallets. The eventID carried only campaign+wreck, so the second payout was
+        // refused WAR_TREASURY_EVENT_CONFLICT (measured 16:16:14Z, 16:33:17Z, 16:36:11Z
+        // on campaign 30000139:r5) and a real defender death paid nothing.
+        eventID: "fw:bounty:" + campaign + ":" + proof + ":" + kindKey,
         reservationID: reservation.reservationID,
         corporationID: reservation.corporationID, proofID: proof, pilotID: pilot});
       if (paid.status !== "APPLIED" && paid.status !== "DUPLICATE")
@@ -194,7 +200,7 @@ function createWarBounty({gameStore, treasury, chest, readWarState, readLinks,
       const receipt = paid.receipt || {};
       const credited = chest.creditPilot({pilotID: pilot,
         cents: Number(receipt.amountCents) || 0,
-        eventID: "war-bounty:" + campaign + ":" + proof,
+        eventID: "war-bounty:" + campaign + ":" + proof + ":" + kindKey,
         reason: "war bounty " + String(kind || "") + " " + campaign});
       const status = credited.status === "APPLIED" ? "PAID" :
         credited.status === "DUPLICATE" ? "ALREADY_PAID" : "ESCROW_RELEASED_NOT_CREDITED";
