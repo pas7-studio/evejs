@@ -110,8 +110,12 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      if(Object.keys(state.processed).length>=MAX_EVENTS)
       return {status:"BLOCKED",reason:"WAR_TREASURY_EVENT_CAP"};
     }
-    const id=command.reservationID,r=own(state.reservations,String(id))?
-     state.reservations[id]:null;
+    // FW-123: an INCOME command has no reservation to name. It is identified by its own
+    // proof, which is already required to be a valid key, so the identity check stays the
+    // same for every movement instead of demanding an escrow id that income cannot have.
+    const income=command.type==="TAX_INCOME"||command.type==="CAPITAL_GRANT";
+    const id=income?String(command.reservationID||command.proofID):command.reservationID,
+     r=own(state.reservations,String(id))?state.reservations[id]:null;
     if(!key(id)||!pos(command.corporationID))
      return {status:"BLOCKED",reason:"INVALID_TREASURY_IDENTITY"};
     // A RESERVE naming a reservation that is already HELD is decided further
