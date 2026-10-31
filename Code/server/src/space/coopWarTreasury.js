@@ -159,12 +159,15 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
     if(warState?.version!==1||!warState.wars||!warState.campaigns)
      return {status:"BLOCKED",reason:"WAR_NATIVE_STATE_UNAVAILABLE"};
     const purpose=command.type==="RESERVE"?command:r;
-    const war=own(warState.wars,purpose.warID)?warState.wars[purpose.warID]:null;
+    // FW-123c: an INCOME command is not a war operation - a tax or a capital grant belongs
+    // to a faction, not to one campaign - so it has no war to belong to.
+    const war=income?null:(own(warState.wars,purpose&&purpose.warID)?
+     warState.wars[purpose.warID]:null);
     // Either real party to the war funds its own chest: the attacker pays for an
     // operation and the defender pays its own defensive bounty. A faction that
     // is not in this war can never touch its escrow.
-    if(!war||(war.attackerFactionID!==purpose.factionID&&
-      war.defenderFactionID!==purpose.factionID))
+    if(!income&&(!war||(war.attackerFactionID!==purpose.factionID&&
+      war.defenderFactionID!==purpose.factionID)))
      return {status:"BLOCKED",reason:"WAR_TREASURY_FACTION_MISMATCH"};
     if(command.type==="RESERVE"){
      // FW-054 (review): terminal rows were never pruned, so after 500 campaign
