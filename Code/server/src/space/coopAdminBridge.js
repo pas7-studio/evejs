@@ -18,7 +18,7 @@
 // runtime decision is never only in a chat log.
 
 // Pure helpers live in space/coopAdminBridgeActions.js (split by scripts/coop-split-module.cjs).
-const { fs, siblingSuffix, REQUESTS, RESULTS, EVENTS, ALLOWED_ACTIONS, MAX_REQUESTS_PER_DRAIN, readJsonLines, writeJsonLines, appendJsonLine, emitEvent, readRow, liveSessionFor, executeChatCommand, createCourierContract, giveItem, removeItem, boardShip, moveItem, fitShip, fitSlots, giveFit, restoreLastLoss, deployStructure, resolveWarPatrolLoadout, spawnNativeNpc, militiaEnlist, warFleetAuthorities, freeHullLinks, listFreeHullsFor, spawnWarFleet, warFleetState, fleetReconstitute, releaseIdentity, assignIdentity } = require("./coopAdminBridgeActions");
+const { fs, siblingSuffix, REQUESTS, RESULTS, EVENTS, ALLOWED_ACTIONS, MAX_REQUESTS_PER_DRAIN, readJsonLines, writeJsonLines, appendJsonLine, emitEvent, readRow, liveSessionFor, executeChatCommand, blueprintAuto, createCourierContract, giveItem, removeItem, boardShip, moveItem, fitShip, fitSlots, giveFit, restoreLastLoss, deployStructure, resolveWarPatrolLoadout, spawnNativeNpc, militiaEnlist, warFleetAuthorities, freeHullLinks, listFreeHullsFor, spawnWarFleet, warFleetState, fleetReconstitute, releaseIdentity, assignIdentity } = require("./coopAdminBridgeActions");
 let stationIndex = null;
 function stationRecord(stationID) {
   const id = Number(stationID) || 0;
@@ -571,6 +571,7 @@ function executeRequest(request) {
   const characterID = Number(request.characterID) || 0;
   if (!(characterID > 0)) return { ok: false, error: "characterID is required" };
   if (action === "chat_command") return executeChatCommand(request);
+  if (action === "blueprint_auto") return blueprintAuto(request);
   if (action === "create_courier_contract") return createCourierContract(request);
   if (action === "give_item") return giveItem(request);
   if (action === "remove_item") return removeItem(request);

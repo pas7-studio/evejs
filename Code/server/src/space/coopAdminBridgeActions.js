@@ -37,7 +37,7 @@ const EVENTS = process.env.EVEJS_COOP_EVENTS_FILE || "/var/lib/evejs/coop-events
 // Stations are static: read them once per process instead of parsing the whole
 // station table for a single name.
 
-const ALLOWED_ACTIONS = new Set(["chat_command", "create_courier_contract", "give_item", "remove_item", "board_ship", "fit_ship", "move_item", "fit_slots", "give_fit", "restore_last_loss", "batch", "deploy_structure", "spawn_native_npc", "war_diagnose", "war_combat_diagnose", "war_funding_diagnose", "war_payout_diagnose", "war_mercenary_settle", "war_mercenary_state", "inspect_npc", "scene_slim_diagnose", "grant_evermarks", "npc_pair_diagnose", "raid_diagnose", "war_state", "mining_fleet_diagnose", "arrival_diagnose", "trip_diagnose", "militia_state", "militia_enlist", "spawn_war_fleet", "release_identity", "assign_identity", "war_fleet_state", "fleet_reconstitute"]);
+const ALLOWED_ACTIONS = new Set(["chat_command", "create_courier_contract", "give_item", "remove_item", "blueprint_auto", "board_ship", "fit_ship", "move_item", "fit_slots", "give_fit", "restore_last_loss", "batch", "deploy_structure", "spawn_native_npc", "war_diagnose", "war_combat_diagnose", "war_funding_diagnose", "war_payout_diagnose", "war_mercenary_settle", "war_mercenary_state", "inspect_npc", "scene_slim_diagnose", "grant_evermarks", "npc_pair_diagnose", "raid_diagnose", "war_state", "mining_fleet_diagnose", "arrival_diagnose", "trip_diagnose", "militia_state", "militia_enlist", "spawn_war_fleet", "release_identity", "assign_identity", "war_fleet_state", "fleet_reconstitute"]);
 
 const MAX_REQUESTS_PER_DRAIN = 8;
 
@@ -101,6 +101,55 @@ function liveSessionFor(characterID) {
       : null;
   } catch (_error) {
     return null;
+  }
+}
+
+
+// COOP_INDUSTRY_DEMO: the `/bpauto` chat command without a client attached.
+//
+// A player docks and types `/bpauto seed frigate`, then quotes, builds and
+// delivers from the same command. QA has no client to dock, so this builds the
+// exact session fields that command reads (stationid/regionid/_space) and runs the
+// SAME `/bpauto` through the ordinary chat dispatch: seeding the blueprint, the
+// quote, the real job-install cost from the wallet and the delivery all go through
+// the industry runtime. Nothing here invents a job or an item.
+function blueprintAuto(request) {
+  const characterID = Number(request.characterID) || 0;
+  const argumentsText = String(request.arguments || "").trim();
+  if (!(characterID > 0)) return { ok: false, error: "characterID is required" };
+  if (!argumentsText) return { ok: false, error: "arguments are required, e.g. \"seed frigate\"" };
+  const character = readRow("characters", characterID);
+  if (!character) return { ok: false, error: "character " + characterID + " not found" };
+  const stationID = Number(request.stationID) || Number(character.stationID) || 0;
+  if (!(stationID > 0)) {
+    return { ok: false, error: "character " + characterID + " is not docked; pass stationID explicitly" };
+  }
+  const systemID = Number(character.solarSystemID) || 0;
+  const session = {
+    characterID,
+    userid: Number(character.accountId) || 0,
+    stationid: stationID,
+    stationID,
+    regionid: Number(character.regionID) || 0,
+    solarSystemID: systemID,
+    _space: { stationID, systemID, initialStateSent: true },
+  };
+  try {
+    const chat = require("../services/chat/chatCommands");
+    if (typeof chat.executeChatCommand !== "function") {
+      return { ok: false, error: "executeChatCommand is missing" };
+    }
+    const result = chat.executeChatCommand(session, "/bpauto " + argumentsText, null, {});
+    return {
+      ok: Boolean(result && result.handled !== false),
+      handled: Boolean(result && result.handled),
+      message: String(result && result.message || ""),
+      characterID,
+      stationID,
+      arguments: argumentsText,
+    };
+  } catch (error) {
+    return { ok: false, error: "blueprint auto failed: " + String(error && error.message || error) };
   }
 }
 
@@ -1621,4 +1670,4 @@ function assignIdentity(request) {
 }
 
 
-module.exports = {fs, siblingSuffix, REQUESTS, RESULTS, EVENTS, ALLOWED_ACTIONS, MAX_REQUESTS_PER_DRAIN, readJsonLines, writeJsonLines, appendJsonLine, emitEvent, readRow, readItemRows, liveSessionFor, executeChatCommand, createCourierContract, giveItem, removeItem, boardShip, moveItem, fitShip, fitSlots, giveFit, restoreLastLoss, deployStructure, resolveWarPatrolLoadout, spawnNativeNpc, militiaEnlist, warFleetAuthorities, freeHullLinks, listFreeHullsFor, spawnWarFleet, warFleetState, fleetReconstitute, releaseIdentity, assignIdentity};
+module.exports = {fs, siblingSuffix, REQUESTS, RESULTS, EVENTS, ALLOWED_ACTIONS, MAX_REQUESTS_PER_DRAIN, readJsonLines, writeJsonLines, appendJsonLine, emitEvent, readRow, readItemRows, liveSessionFor, executeChatCommand, blueprintAuto, createCourierContract, giveItem, removeItem, boardShip, moveItem, fitShip, fitSlots, giveFit, restoreLastLoss, deployStructure, resolveWarPatrolLoadout, spawnNativeNpc, militiaEnlist, warFleetAuthorities, freeHullLinks, listFreeHullsFor, spawnWarFleet, warFleetState, fleetReconstitute, releaseIdentity, assignIdentity};
