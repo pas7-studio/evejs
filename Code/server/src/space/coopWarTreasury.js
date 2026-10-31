@@ -75,7 +75,7 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
   if(!enabled())return {status:"DISABLED"};
   if(busy)return {status:"BLOCKED",reason:"WAR_TREASURY_REENTRANT"};
   if(!command||!key(command.eventID)||
-   !["RESERVE","REFUND","PAYOUT","TAX_INCOME"].includes(command.type))
+   !["RESERVE","REFUND","PAYOUT","TAX_INCOME","CAPITAL_GRANT"].includes(command.type))
    return {status:"BLOCKED",reason:"INVALID_TREASURY_COMMAND"};
   busy=true;
   try{
@@ -141,6 +141,14 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
       !key(command.proofID)||!(Number(command.amountCents)>0)||
       Number(command.amountCents)>100000000000))
      return {status:"BLOCKED",reason:"INVALID_TREASURY_TAX_INCOME"};
+    // FW-123 (owner decision 2026-10-31): a one-time STARTING CAPITAL grant, so a war can
+    // actually be fought and paid before its own economy has produced a single sale. It is
+    // an explicit, labelled, journaled grant - never a silent mint - capped per command and
+    // idempotent by eventID, so replaying it can never create a second fortune.
+    if(command.type==="CAPITAL_GRANT"&&(!pos(command.corporationID)||!pos(command.factionID)||
+      !key(command.proofID)||!(Number(command.amountCents)>0)||
+      Number(command.amountCents)>500000000000))
+     return {status:"BLOCKED",reason:"INVALID_TREASURY_CAPITAL_GRANT"};
     const at=clock();
     if(!pos(at))throw Error("WAR_TREASURY_CLOCK_UNSAFE");
     const warState=tx.get(TABLE,WAR_KEY);
@@ -209,7 +217,7 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
       factionID:held.factionID,warID:held.warID,campaignID:held.campaignID,
       amountCents:held.cents,walletBeforeCents:null,walletAfterCents:null,
       journalID:held.sourceJournalID||0,at:held.reservedAt||0,reused:true}};
-    }else if(command.type==="TAX_INCOME"){
+    }else if(command.type==="TAX_INCOME"||command.type==="CAPITAL_GRANT"){
      // No escrow, no campaign: a tax is income from a sale that really happened.
     }else if(command.type==="PAYOUT"){
      // The escrow belongs to one campaign of one war. A payout must name the
@@ -274,7 +282,8 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      !Array.isArray(division.transactions))
      return {status:"BLOCKED",reason:"NATIVE_CORPORATION_WALLET_UNVERIFIED"};
     const amount=command.type==="RESERVE"?command.amountCents:
-     command.type==="TAX_INCOME"?Number(command.amountCents):r.cents;
+     (command.type==="TAX_INCOME"||command.type==="CAPITAL_GRANT")?
+      Number(command.amountCents):r.cents;
     const next=balance+(command.type==="RESERVE"?-amount:amount);
     // A tax income is the only direction that grows a faction wallet, and it can only
     // grow by the exact amount a real sale already charged.
@@ -304,9 +313,11 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      ownerID2:command.corporationID,
      description:(command.type==="RESERVE"?
       "Coop faction-war internal escrow reserve ":
-      command.type==="TAX_INCOME"?
-      "Coop faction system tax income ":"Coop faction-war escrow refund ")+
-      (command.type==="TAX_INCOME"?String(command.proofID):id),
+      command.type==="TAX_INCOME"?"Coop faction system tax income ":
+      command.type==="CAPITAL_GRANT"?"Coop faction starting capital grant ":
+      "Coop faction-war escrow refund ")+
+      ((command.type==="TAX_INCOME"||command.type==="CAPITAL_GRANT")?
+       String(command.proofID):id),
      amount:isk(command.type==="RESERVE"?-amount:amount),
      balance:isk(next)
     };
@@ -322,7 +333,7 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      // FW-054: room made for this reserve by dropping settled history, so a
      // full ledger can never look like a world that simply cannot fund a war.
      prunedReservations:Number(validators.pruned)||0};
-    if(command.type==="TAX_INCOME"){
+    if(command.type==="TAX_INCOME"||command.type==="CAPITAL_GRANT"){
      // Income is not a reservation: it is recorded on the receipt only.
     }else if(command.type==="RESERVE"){
      state.reservations[id]={reservationID:id,corporationID:command.corporationID,
