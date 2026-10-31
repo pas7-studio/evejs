@@ -210,6 +210,11 @@ const DAILY_GOAL_PROTO_ROOT = protobuf.Root.fromJSON({
                   },
                 },
                 RedeemResponse: { fields: {} },
+                // The client subscribes to this and switches the card to "claimed" when it
+                // arrives; without it the window only catches up on the next reload.
+                RedeemedNotice: {
+                  fields: { goal: { type: "eve_public.dailygoal.Identifier", id: 1 } },
+                },
                 PayForCompletionRequest: {
                   fields: { goal: { type: "eve_public.dailygoal.Identifier", id: 1 } },
                 },
@@ -365,7 +370,24 @@ function createDailyGoalGatewayService(context = {}) {
     progressRequest: DAILY_GOAL_PROTO_ROOT.lookupType(
       "eve_public.dailygoal.api.admin.ProgressRequest",
     ),
+    redeemedNotice: DAILY_GOAL_PROTO_ROOT.lookupType(
+      "eve_public.dailygoal.api.RedeemedNotice",
+    ),
   };
+
+  // The client's daily-goal messenger subscribes to RedeemedNotice (dailygoals/client/
+  // goalMessenger.pyj). Publishing it after a real redeem is what makes the card update
+  // instead of waiting for the next page load.
+  function publishRedeemed(characterID, goalID) {
+    if (typeof context.publishGatewayNotice !== "function") return;
+    context.publishGatewayNotice(
+      "eve_public.dailygoal.api.RedeemedNotice",
+      encodePayload(types.redeemedNotice, {
+        goal: { uuid: uuidStringToBuffer(goalID) },
+      }),
+      { character: Number(characterID) || 0 },
+    );
+  }
 
   function decode(type, requestEnvelope) {
     return type.decode(
@@ -479,6 +501,7 @@ function createDailyGoalGatewayService(context = {}) {
         const goalID = goalIDOf(decode(types.redeemRequest, requestEnvelope).goal);
         const result = dailyGoals.redeem(characterID, goalID, nowMs);
         if (result.status === "REDEEMED") {
+          publishRedeemed(characterID, goalID);
           return {
             statusCode: 200,
             statusMessage: "",
