@@ -153,6 +153,12 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
     ]),
   }),
   serpentis: Object.freeze({
+    // FW-126: same omission as the Angel family - see the note above.
+    tackleTypeIDs: Object.freeze([
+      448,
+      527,
+      3244,
+    ]),
     weaponTypeIDs: Object.freeze([
       13888,
       13884,
@@ -170,6 +176,12 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
       41130,
       41142,
       24554,
+      561,
+      564,
+      566,
+      568,
+      570,
+      572,
     ]),
     chargeTypeIDs: Object.freeze([
       20040,
@@ -182,6 +194,11 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
       527,
       448,
       3244,
+      1969,
+      2109,
+      11357,
+      2048,
+      3598,
     ]),
   }),
   angelCartel: Object.freeze({
@@ -209,6 +226,9 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
       41083,
       41160,
       23674,
+      484,
+      490,
+      491,
     ]),
     chargeTypeIDs: Object.freeze([
       20767,
@@ -217,11 +237,24 @@ const NPC_HARDWARE_CATALOG = Object.freeze({
       17670,
       17678,
     ]),
+    // FW-126 (measured 2026-10-31): every pirate family listed its tackle modules
+    // (448 scrambler, 527 web, 3244 disruptor) only under utilityTypeIDs, so a module
+    // whose role resolves to "tackle" failed the policy and the whole Angel garrison
+    // answered NPC_NATIVE_HARDWARE_POLICY_VIOLATION with loadout null. The co-op war
+    // doctrine flies these exact real SDE modules, so the family now allows them.
+    tackleTypeIDs: Object.freeze([
+      448,
+      527,
+      3244,
+    ]),
     utilityTypeIDs: Object.freeze([
       527,
       448,
       3244,
       19806,
+      2109,
+      11357,
+      2048,
     ]),
   }),
   guristasLaunchers: Object.freeze({
