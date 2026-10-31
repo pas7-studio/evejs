@@ -281,8 +281,14 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      division=corp?.wallet?.divisions?.["1000"],
      balance=cents(division?.balance);
     let corporationOK=false;
+    // FW-123d (measured 2026-10-31): an INCOME command carries its own faction - it has
+    // no reservation row, so `purpose` is null and reading purpose.factionID threw. The
+    // empty catch turned that into a plain false and every capital grant was reported as
+    // NATIVE_CORPORATION_WALLET_UNVERIFIED while the wallet row was right there.
+    const walletFaction=income?Number(command.factionID):purpose.factionID,
+     walletWar=income?null:purpose.warID;
     try{corporationOK=verifyCorporation({corporationID:command.corporationID,
-      factionID:purpose.factionID,warID:purpose.warID},corp,tx)===true}catch{}
+      factionID:walletFaction,warID:walletWar},corp,tx)===true}catch{}
     if(!corporationOK||!corp||
      (corp.corporationID!==undefined&&corp.corporationID!==command.corporationID)||
      balance===null||!Array.isArray(division.journal)||
