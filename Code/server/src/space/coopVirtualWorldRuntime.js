@@ -5297,7 +5297,7 @@ function payPilotForPurchase({pilotID,typeID,stationID,systemID}={}){
 // products because it owned four blueprints; the seeded world sells 2 772 of them, and this is
 // the only path that spends real ISK for a real item. Nothing is created: the trader matches a
 // seeded ask, debits the corporation and puts the real copy in the hangar.
-async function buyFromStationStock({systemID,stationID,typeID,haulerID,scene=null}={}){
+async function buyFromStationStock({systemID,stationID,typeID,haulerID,scene=null,intent=null}={}){
  if(process.env.EVEJS_COOP_BLUEPRINT_PURCHASE!=="1")return {status:"DISABLED"};
  if(process.env.EVEJS_COOP_NATIVE_NPC_MARKET!=="1")return {status:"MARKET_OFF"};
  const pilotID=String((identityRegistry?.snapshot?.()?.links||{})[Object.keys(identityRegistry?.snapshot?.()?.links||{})
@@ -5326,7 +5326,10 @@ async function buyFromStationStock({systemID,stationID,typeID,haulerID,scene=nul
      stationID:Number(stationID),side:"buy",typeID:Number(typeID),buyTypes:[Number(typeID)],
      sellTypes:[]},{withinBatch:false});
   }
-  try{require("./coopRuntimeProbe").observe("living-npc-blueprint-bought",null,null,
+  // One event per INTENT: an input purchase is not a blueprint, and a wrong name would make
+  // the economy unreadable in its own log.
+  const boughtEvent=intent==="input"?"living-npc-input-bought":"living-npc-blueprint-bought";
+  try{require("./coopRuntimeProbe").observe(boughtEvent,null,null,
    {systemID:Number(systemID),stationID:Number(stationID),typeID:Number(typeID),
     haulerID:Number(haulerID),status:String(answer&&answer.status||"UNKNOWN"),
     price:Number(answer&&answer.price||0),quantity:Number(answer&&answer.quantity||0)});}catch(_error){}
@@ -5680,4 +5683,4 @@ function linkSpawnedIdentity({pilotID,systemID,entityID,role}={}){
   return {status:"LINK_FAILED",reason:String(error?.message||error)};
  }
 }
-module.exports={nativeGateTransferAdapter,identityRegistryAdapter,buyFromStationStock,reconcileMarketJournalsAtBoot,witnessedNativeBossWreck,createWarRecoveryAdmin,start,observeSession,confirmedWreck,confirmedNativeNpcWreck,nextHeadlessRetryMs,isHeadlessNativeReady,alifeOrderArbitrationEnabled,sellOnArrival,nativeWarFleetRegistry,livingWorldPhases,linkSpawnedIdentity,releaseSpawnedIdentity,diagnoseMobilization,identityLinks,deriveTerritoryOwners,planTerritoryBootstrap,bootstrapTerritoriesFromPresence,chooseWarRestore,readWarMirror,legacyWarStateMirrorEnabled,refundExpiredCampaigns,reconcileTerminalEscrow,reconcileBountyCredits,warBountyRelease,diagnoseWarPayout,diagnoseNavy,diagnoseCombat,diagnoseWarFunding,executeMercenaryContract,diagnoseMercenarySettlement,diagnoseNpcOrder,diagnoseNativeRaids,diagnoseWarState,warFrontChat};
+module.exports={nativeGateTransferAdapter,identityRegistryAdapter,buyFromStationStock,reconcileMarketJournalsAtBoot,witnessedNativeBossWreck,createWarRecoveryAdmin,start,observeSession,confirmedWreck,confirmedNativeNpcWreck,nextHeadlessRetryMs,isHeadlessNativeReady,alifeOrderArbitrationEnabled,sellOnArrival,nativeWarFleetRegistry,livingWorldPhases,linkSpawnedIdentity,releaseSpawnedIdentity,diagnoseMobilization,identityLinks,deriveTerritoryOwners,planTerritoryBootstrap,bootstrapTerritoriesFromPresence,chooseWarRestore,readWarMirror,legacyWarStateMirrorEnabled,refundExpiredCampaigns,reconcileTerminalEscrow,reconcileBountyCredits,warBountyRelease,diagnoseWarPayout,diagnoseNavy,diagnoseCombat,diagnoseWarFunding,executeMercenaryContract,diagnoseMercenarySettlement,diagnoseNpcOrder,diagnoseNativeRaids,diagnoseWarState,warFrontChat,warCasualtySnapshot};
