@@ -25,6 +25,11 @@ const { rawLayoutField } = require("./thirdPartySkinDraftGatewayService");
 const JOB = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job";
 const JOB_API = `${JOB}.api`;
 const QUOTE_API = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api";
+// Spelled out: the notice audit scans for these literal names, and a template string hides them.
+const STARTED_NOTICE_TYPE =
+  "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice";
+const COMPLETED_NOTICE_TYPE =
+  "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompletedNotice";
 const COMPONENT = "eve_public.cosmetic.ship.skin.thirdparty.component";
 // A design's tier level is computed by the client from its own threshold table and is not
 // something the server can observe. The world charges no PLEX for any tier and runs one fixed
@@ -220,6 +225,14 @@ const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
                                         },
                                       },
                                     },
+                                    CompletedNotice: {
+                                      fields: {
+                                        id: {
+                                          type: "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.Identifier",
+                                          id: 1,
+                                        },
+                                      },
+                                    },
                                   },
                                 },
                               },
@@ -380,15 +393,30 @@ function createSkinSequencingGatewayService(context = {}) {
     earlyCompletionPricingResponse: SEQUENCING_PROTO_ROOT.lookupType(
       `${QUOTE_API}.GetEarlyCompletionPricingResponse`,
     ),
-    startedNotice: SEQUENCING_PROTO_ROOT.lookupType(`${JOB_API}.StartedNotice`),
+    startedNotice: SEQUENCING_PROTO_ROOT.lookupType(STARTED_NOTICE_TYPE),
+    completedNotice: SEQUENCING_PROTO_ROOT.lookupType(COMPLETED_NOTICE_TYPE),
   };
+
+  // A job that came due completes inside a read, so the store queues the completion for whoever
+  // caused it. Nothing is announced unless the store really minted the copies.
+  function publishCompletions(characterID) {
+    if (typeof sequencing.takeCompletions !== "function") return;
+    if (typeof context.publishGatewayNotice !== "function") return;
+    for (const row of sequencing.takeCompletions(characterID)) {
+      context.publishGatewayNotice(
+        COMPLETED_NOTICE_TYPE,
+        encodePayload(types.completedNotice, { id: jobIdentifier(row) }),
+        { character: Number(characterID) || 0 },
+      );
+    }
+  }
 
   // Told to the character that started the job, so its window shows the job at once. Published
   // only when the store really started one; a refusal announces nothing.
   function publishStarted(characterID, job) {
     if (typeof context.publishGatewayNotice !== "function") return;
     context.publishGatewayNotice(
-      `${JOB_API}.StartedNotice`,
+      STARTED_NOTICE_TYPE,
       encodePayload(types.startedNotice, { id: jobIdentifier(job) }),
       { character: Number(characterID) || 0 },
     );
@@ -459,12 +487,14 @@ function createSkinSequencingGatewayService(context = {}) {
       const activeCharacterID = Number(getActiveCharacterID(requestEnvelope) || 0);
 
       if (requestTypeName === `${JOB_API}.GetAllActiveRequest`) {
-        return ok(`${JOB_API}.GetAllActiveResponse`, types.getAllActiveResponse, {
+        const response = ok(`${JOB_API}.GetAllActiveResponse`, types.getAllActiveResponse, {
           jobs: sequencing.list(activeCharacterID).map((job) => ({
             id: jobIdentifier(job),
             attributes: jobAttributes(job),
           })),
         });
+        publishCompletions(activeCharacterID);
+        return response;
       }
 
       if (requestTypeName === `${JOB_API}.GetRequest`) {
@@ -473,6 +503,7 @@ function createSkinSequencingGatewayService(context = {}) {
         if (!job) return error(5, "no such sequencing job", `${JOB_API}.GetResponse`);
         const attributes = jobAttributes(job);
         attributes.sequencer = { sequential: activeCharacterID };
+        publishCompletions(activeCharacterID);
         return ok(`${JOB_API}.GetResponse`, types.getResponse, { job: attributes });
       }
 
@@ -547,6 +578,7 @@ function createSkinSequencingGatewayService(context = {}) {
       if (result.status !== "COMPLETED") {
         return refusalFor(result, `${JOB_API}.CompleteEarlyResponse`);
       }
+      publishCompletions(activeCharacterID);
       return ok(`${JOB_API}.CompleteEarlyResponse`);
     },
   };

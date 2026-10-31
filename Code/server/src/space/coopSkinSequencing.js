@@ -129,6 +129,24 @@ function createSkinSequencing({
     }
   }
 
+  // A job completes on read, so the completion waits here until the caller that caused the read
+  // drains it. A job's completedMs is set once, so nothing is queued or announced twice.
+  const completions = new Map();
+  function queueCompletion(characterID, event) {
+    if (!(characterID > 0) || !event) return 0;
+    const rows = completions.get(characterID) || [];
+    rows.push(event);
+    completions.set(characterID, rows.slice(-64));
+    return rows.length;
+  }
+  function takeCompletions(characterID) {
+    const id = int(characterID);
+    if (id <= 0) return [];
+    const rows = completions.get(id) || [];
+    completions.delete(id);
+    return rows;
+  }
+
   function completeJob(characterID, state, job, nowMs) {
     const hex = job.skinHex || skinHexFor(job.uuid);
     const minted = licenceStore().grant(characterID, {
@@ -148,6 +166,15 @@ function createSkinSequencing({
     job.pending = false;
     job.skinHex = hex;
     job.completedMs = nowMs;
+    // A job completes on read, so the completion is queued for whoever caused the read and drained
+    // by the gateway that announces it. A failure is not queued: its notice carries an enum reason
+    // this store cannot name, and a made-up reason is worse than no notice.
+    queueCompletion(int(characterID), {
+      uuid: job.uuid,
+      quantity: Math.max(1, int(job.quantity) || 1),
+      skinHex: hex,
+      completedMs: nowMs,
+    });
     return job;
   }
 
@@ -278,6 +305,7 @@ function createSkinSequencing({
     get,
     initiate,
     completeEarly,
+    takeCompletions,
   });
 }
 
