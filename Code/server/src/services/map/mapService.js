@@ -410,6 +410,66 @@ function buildIndustryCostIndexDict(activityID) {
   );
 }
 
+// The map's deadspace filters read a flat list of
+// (solarSystemID, dungeonID, difficulty, dungeonName) tuples. Until now both
+// calls answered null, so the filters silently drew nothing. The rows come from
+// the dungeon instances that are really active right now - one row per
+// (system, dungeon) with the real template name and the highest difficulty
+// seen - never from a static table that could disagree with the world.
+const DEADSPACE_DIFFICULTY_MAX = 5;
+
+function listDeadspaceRows(options = {}) {
+  const origin = String(options && options.origin || "").trim();
+  let state = null;
+  let authority = null;
+  try {
+    state = require(path.join(__dirname, "../dungeon/dungeonRuntimeState"));
+    authority = require(path.join(__dirname, "../dungeon/dungeonAuthority"));
+  } catch (_error) {
+    return [];
+  }
+  if (!state || typeof state.listInstanceSummariesByLifecycle !== "function") return [];
+  const byKey = new Map();
+  for (const instance of state.listInstanceSummariesByLifecycle("active") || []) {
+    const solarSystemID = toPositiveInteger(instance && instance.solarSystemID, 0);
+    const dungeonID = toPositiveInteger(instance && instance.sourceDungeonID, 0);
+    if (!(solarSystemID > 0) || !(dungeonID > 0)) continue;
+    if (origin && String(instance && instance.siteOrigin || "") !== origin) continue;
+    const siteKind = String(instance && instance.siteKind || "").toLowerCase();
+    if (origin === "universe_dungeon" && siteKind !== "anomaly" && siteKind !== "signature") continue;
+    let template = null;
+    try {
+      template = authority && typeof authority.getTemplateByID === "function"
+        ? authority.getTemplateByID(instance.templateID)
+        : null;
+    } catch (_error) {
+      template = null;
+    }
+    const difficulty = Math.max(
+      1,
+      Math.min(
+        DEADSPACE_DIFFICULTY_MAX,
+        toPositiveInteger(instance && instance.difficulty, 0) ||
+          toPositiveInteger(template && template.difficulty, 0) ||
+          1,
+      ),
+    );
+    const name = String(
+      (template && template.resolvedName) ||
+        (instance && instance.siteKey) ||
+        `Dungeon ${dungeonID}`,
+    ).trim();
+    const key = `${solarSystemID}:${dungeonID}`;
+    const previous = byKey.get(key);
+    if (previous) {
+      if (difficulty > previous[2]) previous[2] = difficulty;
+      continue;
+    }
+    byKey.set(key, [solarSystemID, dungeonID, difficulty, name]);
+  }
+  return [...byKey.values()].sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+}
+
 class MapService extends BaseService {
   constructor() {
     super("map");
@@ -525,14 +585,16 @@ class MapService extends BaseService {
 
   Handle_GetDeadspaceAgentsMap(args) {
     const languageID = String((args && args[0]) || "").trim();
-    log.debug(`[MapService] GetDeadspaceAgentsMap languageID=${languageID}`);
-    return null;
+    const rows = listDeadspaceRows({ origin: "agentmission" });
+    log.debug(`[MapService] GetDeadspaceAgentsMap languageID=${languageID} rows=${rows.length}`);
+    return buildList(rows);
   }
 
   Handle_GetDeadspaceComplexMap(args) {
     const languageID = String((args && args[0]) || "").trim();
-    log.debug(`[MapService] GetDeadspaceComplexMap languageID=${languageID}`);
-    return null;
+    const rows = listDeadspaceRows({ origin: "universe_dungeon" });
+    log.debug(`[MapService] GetDeadspaceComplexMap languageID=${languageID} rows=${rows.length}`);
+    return buildList(rows);
   }
 
   Handle_GetIndustryJobsOverLast24Hours(args) {
