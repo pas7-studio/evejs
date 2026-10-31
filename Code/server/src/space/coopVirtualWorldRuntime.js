@@ -5,7 +5,7 @@ const { observedNpcIDs, visitedSystems, raidDiagnose, initializedNativeMiningSce
 const jsonFileCache = require("./coopJsonFileCache");
 // Optional background driver of virtual world; no NPC ships materialized.
 let world=null,timer=null,combatTimer=null,bridge=null,gateTravelDirector=null,nativeGateTransfer=null,nativeMarketTrader=null,nativeMarketTickRunning=false,nativeMarketBlocked=false,economy=null,lossBridge=null,factionDirector=null,patrolDirector=null,patrolNavigator=null,civilianOrders=null,life=null,identityRegistry=null,raidDirector=null,huntPolicy=null,tacticsDirector=null,pveSiteDefenseDirector=null,pveWaveReinforcementsDirector=null,pveObjectiveDoctrineDirector=null,pveNativeBossDirector=null,activityDirector=null,combatEvidenceDirector=null,stockCombatEvidenceDirector=null,warpPointDirector=null,nativeGunRange=null;
-let warDoctrineInstance=null,warCaptureByForce=null,warFleetRegistry=null,warBattleDirector=null,warEngagement=null,warPosture=null,warLossReconcile=null,warGarrison=null,warMobilizer=null,warGateStaging=null,warGateHandoff=null,warRecoverySocket=null,warDemobilizer=null,warCasualtyLedger=null,warObjectiveDirector=null,warOpening=null,warRelief=null,gateStagingSkipKey=null,followOrderReason=null;
+let warTaxIncome=null,warDoctrineInstance=null,warCaptureByForce=null,warFleetRegistry=null,warBattleDirector=null,warEngagement=null,warPosture=null,warLossReconcile=null,warGarrison=null,warMobilizer=null,warGateStaging=null,warGateHandoff=null,warRecoverySocket=null,warDemobilizer=null,warCasualtyLedger=null,warObjectiveDirector=null,warOpening=null,warRelief=null,gateStagingSkipKey=null,followOrderReason=null;
 // Native wreck IDs this process confirmed (and, after a restart, the durable
 // casualty ledger): the only proof that a registered warship is really gone.
 let casualtySeedDone=false;
@@ -3862,6 +3862,35 @@ async function advanceNativeMarket(){ if(process.env.EVEJS_COOP_NATIVE_NPC_MARKE
       ...trade,buyTypes,sellTypes
      });
      if(result.status==="TRADE_SETTLED"){
+
+      // FW-122: the faction that HOLDS this system takes its share of the tax this sale
+      // already charged. The amount is the real sale and never an invented one; a system
+      // with no controller pays nobody, and that refusal is published instead of swallowed.
+      try{
+       const saleIsk=Number(result.isk)||Number(result.gross)||0;
+       const taxCents=Math.max(0,Math.round(saleIsk*100*0.02));
+       if(taxCents>0){
+        if(!warTaxIncome)warTaxIncome=require("./coopFactionTaxIncome").createFactionTaxIncome({
+         readWarState:()=>warStateStore().read(),
+         getStation:id=>require("./worldData").getStationByID(Number(id)),
+         corporationFor:factionID=>warFactionCorporation(factionID,warPresencePilots(),
+          warEarnedLedger()),
+         treasury:{execute:command=>warTreasuryStore().execute(command)}
+        });
+        const taxProof="sale:"+Number(station.itemID)+":"+Number(trade.typeID)+":"+
+         Math.round(Number(trade.quantity)||0)+":"+String(result.referenceID||"");
+        const taxed=warTaxIncome.collect({stationID:Number(station.itemID),
+         amountCents:taxCents,proofID:taxProof,eventID:"tax:"+taxProof});
+        require("./coopRuntimeProbe").observe(
+         taxed.status==="APPLIED"||taxed.status==="DUPLICATE"?
+          "living-faction-tax-paid":"living-faction-tax-refused",null,
+         {spaceState:{systemID}},{status:taxed.status,reason:String(taxed.reason||""),
+          systemID:Number(taxed.systemID)||Number(systemID),
+          factionID:Number(taxed.factionID)||0,
+          corporationID:Number(taxed.corporationID)||0,
+          amountCents:Number(taxed.amountCents)||0});
+       }
+      }catch(_error){/* a tax failure must never stop a real sale */}
       completed++;
       // A sale resets this stack's asking price for the next haul.
       if(trade.side==="sell"){
@@ -5224,11 +5253,11 @@ function releaseStationIdleTarget({systemID,stationID,haulerID,scene=null}={}){
 async function buyFromStationStock({systemID,stationID,typeID,haulerID,scene=null}={}){
  if(process.env.EVEJS_COOP_BLUEPRINT_PURCHASE!=="1")return {status:"DISABLED"};
  if(process.env.EVEJS_COOP_NATIVE_NPC_MARKET!=="1")return {status:"MARKET_OFF"};
- const pilotID=String((registry?.snapshot?.()?.links||{})[Object.keys(registry?.snapshot?.()?.links||{})
-  .find(key=>Number(registry.snapshot().links[key].entityID)===Number(haulerID))]?.pilotID||"");
+ const pilotID=String((identityRegistry?.snapshot?.()?.links||{})[Object.keys(identityRegistry?.snapshot?.()?.links||{})
+  .find(key=>Number(identityRegistry.snapshot().links[key].entityID)===Number(haulerID))]?.pilotID||"");
  const trader=ensureMarketTrader();
  if(!trader)return {status:"MARKET_UNAVAILABLE"};
- const link=Object.values(registry?.snapshot?.()?.links||{})
+ const link=Object.values(identityRegistry?.snapshot?.()?.links||{})
   .find(row=>Number(row.entityID)===Number(haulerID))||null;
  if(!link)return {status:"NO_IDENTITY_LINK"};
  try{

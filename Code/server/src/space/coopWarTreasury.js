@@ -75,7 +75,7 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
   if(!enabled())return {status:"DISABLED"};
   if(busy)return {status:"BLOCKED",reason:"WAR_TREASURY_REENTRANT"};
   if(!command||!key(command.eventID)||
-   !["RESERVE","REFUND","PAYOUT"].includes(command.type))
+   !["RESERVE","REFUND","PAYOUT","TAX_INCOME"].includes(command.type))
    return {status:"BLOCKED",reason:"INVALID_TREASURY_COMMAND"};
   busy=true;
   try{
@@ -133,6 +133,14 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
       r.corporationID!==command.corporationID||!key(command.proofID)||
       !pilotRef(command.pilotID)))
      return {status:"BLOCKED",reason:"INVALID_TREASURY_PAYOUT"};
+    // FW-122: TAX INCOME. A faction that holds a system takes a share of the tax its
+    // market already charges. This is NOT minting: the caller passes the exact amount
+    // that was debited from a real seller, with the sale as its proof, and the same
+    // journal entry is written into the corporation wallet as every other movement.
+    if(command.type==="TAX_INCOME"&&(!pos(command.corporationID)||!pos(command.factionID)||
+      !key(command.proofID)||!(Number(command.amountCents)>0)||
+      Number(command.amountCents)>100000000000))
+     return {status:"BLOCKED",reason:"INVALID_TREASURY_TAX_INCOME"};
     const at=clock();
     if(!pos(at))throw Error("WAR_TREASURY_CLOCK_UNSAFE");
     const warState=tx.get(TABLE,WAR_KEY);
@@ -201,6 +209,8 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
       factionID:held.factionID,warID:held.warID,campaignID:held.campaignID,
       amountCents:held.cents,walletBeforeCents:null,walletAfterCents:null,
       journalID:held.sourceJournalID||0,at:held.reservedAt||0,reused:true}};
+    }else if(command.type==="TAX_INCOME"){
+     // No escrow, no campaign: a tax is income from a sale that really happened.
     }else if(command.type==="PAYOUT"){
      // The escrow belongs to one campaign of one war. A payout must name the
      // campaign that really exists for this reservation.
@@ -263,8 +273,11 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      balance===null||!Array.isArray(division.journal)||
      !Array.isArray(division.transactions))
      return {status:"BLOCKED",reason:"NATIVE_CORPORATION_WALLET_UNVERIFIED"};
-    const amount=command.type==="RESERVE"?command.amountCents:r.cents;
+    const amount=command.type==="RESERVE"?command.amountCents:
+     command.type==="TAX_INCOME"?Number(command.amountCents):r.cents;
     const next=balance+(command.type==="RESERVE"?-amount:amount);
+    // A tax income is the only direction that grows a faction wallet, and it can only
+    // grow by the exact amount a real sale already charged.
     if(!nonneg(next)||!nonneg(amount)||!nonneg(state.nextJournalID)||
      state.nextJournalID>=Number.MAX_SAFE_INTEGER-1||
      (command.type==="RESERVE"&&next<command.minRemainingCents))
@@ -290,7 +303,10 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      sortValue:1,ownerID1:command.corporationID,
      ownerID2:command.corporationID,
      description:(command.type==="RESERVE"?
-      "Coop faction-war internal escrow reserve ":"Coop faction-war escrow refund ")+id,
+      "Coop faction-war internal escrow reserve ":
+      command.type==="TAX_INCOME"?
+      "Coop faction system tax income ":"Coop faction-war escrow refund ")+
+      (command.type==="TAX_INCOME"?String(command.proofID):id),
      amount:isk(command.type==="RESERVE"?-amount:amount),
      balance:isk(next)
     };
@@ -306,7 +322,9 @@ function createWarTreasury({gameStore,verifyCorporation,authorizeRefund,
      // FW-054: room made for this reserve by dropping settled history, so a
      // full ledger can never look like a world that simply cannot fund a war.
      prunedReservations:Number(validators.pruned)||0};
-    if(command.type==="RESERVE"){
+    if(command.type==="TAX_INCOME"){
+     // Income is not a reservation: it is recorded on the receipt only.
+    }else if(command.type==="RESERVE"){
      state.reservations[id]={reservationID:id,corporationID:command.corporationID,
       factionID:command.factionID,warID:command.warID,
       campaignID:command.campaignID,cents:amount,status:"HELD",
