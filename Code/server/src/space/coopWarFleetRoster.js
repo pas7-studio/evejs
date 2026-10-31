@@ -25,7 +25,12 @@ const VERSION = 1;
 const MAX_FLEETS = 256;
 const MAX_SHIPS = 64;
 const MAX_LOSSES = 256;
-const ROLES = new Set(["tackle", "brawler", "sniper", "logistics", "ewar", "heavy"]);
+// FW-120: the roster must know every role a doctrine can field. MEASURED 2026-10-31: the new
+// anti-tackle role was missing here, so createFleet answered FLEET_DOCTRINE_REQUIRED and NO
+// formation was recorded at all - five real hulls in space, fleetID empty, and only the
+// commander ever appeared in the fleet registry.
+const ROLES = new Set(["tackle", "anti-tackle", "brawler", "sniper", "logistics", "ewar",
+  "heavy"]);
 const FACTIONS = /^[0-9]{1,20}$/;
 const pos = (value) => Number.isSafeInteger(Number(value)) && Number(value) > 0;
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
