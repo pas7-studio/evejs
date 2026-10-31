@@ -1747,6 +1747,16 @@ function advanceNativeWarGarrison(){
   // single slot rotated between them and the assault never began. Two sides per tick is
   // still one sanctioned spawn per side, and it lets a front muster in one cycle.
   maxSpawnsPerTick:2,
+  // FW-134: the hulls this exact side already lost in this campaign, straight from the
+  // casualty ledger - the only record that survives a released identity link.
+  lossCount:({campaignID,factionID})=>{
+   try{
+    const snapshot=warCasualtySnapshot();
+    return Object.values((snapshot&&snapshot.byWreck)||{})
+     .filter(row=>row&&row.campaignID===campaignID&&
+      Number(row.victimFactionID)===Number(factionID)).length;
+   }catch(_error){return 0}
+  },
   readWarState:()=>warStateStore().read(),
   registry:nativeWarFleetRegistry(),
   // FW-115: a commander spawns the formation its EARNED merit allows (recruit 1, pilot 2,

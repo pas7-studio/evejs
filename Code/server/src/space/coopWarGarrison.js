@@ -45,6 +45,10 @@ function createWarGarrison({
   garrisonSize = 2,
   cooldownMs = 180000,
   maxSpawnsPerTick = 1,
+  // FW-134: how many hulls this exact side already lost in this campaign. A side that
+  // keeps dying refills more slowly, which is what finally lets an assault empty a
+  // system for the capture sustain window instead of trading one hull forever.
+  lossCount = null,
 } = {}) {
   if (
     [readWarState, listFreePilots, spawnFleet].some(x => typeof x !== "function") ||
@@ -53,6 +57,7 @@ function createWarGarrison({
     (isHullLive !== null && typeof isHullLive !== "function") ||
     (chestCommitment !== null && typeof chestCommitment !== "function") ||
     (meritOf !== null && typeof meritOf !== "function") ||
+    (lossCount !== null && typeof lossCount !== "function") ||
     !Number.isInteger(garrisonSize) || garrisonSize < 1 || garrisonSize > 6 ||
     !Number.isSafeInteger(cooldownMs) || cooldownMs < 10000 ||
     !Number.isInteger(maxSpawnsPerTick) || maxSpawnsPerTick < 1 || maxSpawnsPerTick > 2
@@ -176,7 +181,17 @@ function createWarGarrison({
           skips.push({ campaignID: campaign.campaignID, systemID, factionID, reason: "NO_FREE_PILOT_IDENTITY", missing });
           continue;
         }
-        nextAt.set(key, now + cooldownMs);
+        // FW-134: attrition costs time. A side that has already lost hulls in this
+        // campaign waits longer before it can refill, so a winning attacker can hold
+        // an empty, wreck-backed system for the capture window.
+        let losses = 0;
+        try {
+          losses = typeof lossCount === "function"
+            ? Number(lossCount({ campaignID: campaign.campaignID, factionID,
+                warID: campaign.warID })) || 0 : 0;
+        } catch (_error) { losses = 0; }
+        const penalty = Math.min(6, Math.max(0, Math.trunc(losses)));
+        nextAt.set(key, now + cooldownMs * (1 + penalty));
         spawned += 1;
         let ack = null, threw = "";
         let commanderMerit = 0;
