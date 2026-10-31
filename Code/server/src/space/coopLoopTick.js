@@ -326,6 +326,19 @@ function distributionRunAuthorities(options = {}) {
           if (!home) return {status: "NO_FACTORY_STATION"};
           const need = nextMissingInput(factorySupply(home));
           if (!need) return {status: "NOTHING_TO_BUY"};
+          // One shopping trip per input at a time. Measured 2026-10-31: three hulls planned
+          // the same Mexallon shortfall and bought 420 units for a 119-unit need, because the
+          // material sits in a HOLD until the trip comes home and the hangar is recomputed.
+          try {
+            const runs = require("./coopDistributionRun").list(env) || [];
+            const busy = runs.find((row) => row && String(row.mode) === "import" &&
+              Number(row.haulerID) !== Number(haulerID) &&
+              (Array.isArray(row.importTypes) ? row.importTypes : []).map(Number)
+                .includes(Number(need.typeID)) &&
+              !["RETURN", "DONE", "PLAN"].includes(String(row.phase)));
+            if (busy) return {status: "IMPORT_IN_PROGRESS",
+              haulerID: Number(busy.haulerID), typeID: Number(need.typeID)};
+          } catch (_error) { /* no journal directory is no lock */ }
           const native = store.getNativeEntity(haulerID);
           const here = Number(native && native.systemID) || 0;
           if (!here) return {status: "HULL_UNKNOWN"};
