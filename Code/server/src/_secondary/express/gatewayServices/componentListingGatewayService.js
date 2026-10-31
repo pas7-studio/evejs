@@ -19,6 +19,8 @@ const LISTING_API = "eve_public.cosmetic.market.component.listing.api";
 const LISTING = "eve_public.cosmetic.market.component.listing";
 const COMPONENT_GROUP_ID = 4726;
 const MAX_SEED_LISTINGS = 120;
+// A design element this world sells for a stated price; see the catalog comment.
+const DEFAULT_COMPONENT_PRICE_ISK = 250000;
 
 const PROTO_ROOT = protobuf.Root.fromJSON({
   nested: {
@@ -96,28 +98,28 @@ const PROTO_ROOT = protobuf.Root.fromJSON({
                             attributes: { type: `${LISTING}.Attributes`, id: 2 },
                           },
                         },
-                      },
-                    },
-                    api: {
-                      nested: {
-                        GetAllRequest: { fields: {} },
-                        GetAllResponse: {
-                          fields: { listings: { type: `${LISTING}.Entry`, id: 1, rule: "repeated" } },
-                        },
-                        InitiatePurchaseListingRequest: {
-                          fields: {
-                            listing: { type: `${LISTING}.Identifier`, id: 1 },
-                            quantity: { type: "uint32", id: 2 },
-                            immediately_activate: { type: "bool", id: 3 },
-                          },
-                        },
-                        InitiatePurchaseListingResponse: {
-                          fields: {
-                            transaction: {
-                              type: "eve_public.cosmetic.market.transaction.Identifier",
-                              id: 1,
+                        api: {
+                          nested: {
+                            GetAllRequest: { fields: {} },
+                            GetAllResponse: {
+                              fields: { listings: { type: `${LISTING}.Entry`, id: 1, rule: "repeated" } },
                             },
-                            immediately_activate: { type: "bool", id: 2 },
+                            InitiatePurchaseListingRequest: {
+                              fields: {
+                                listing: { type: `${LISTING}.Identifier`, id: 1 },
+                                quantity: { type: "uint32", id: 2 },
+                                immediately_activate: { type: "bool", id: 3 },
+                              },
+                            },
+                            InitiatePurchaseListingResponse: {
+                              fields: {
+                                transaction: {
+                                  type: "eve_public.cosmetic.market.transaction.Identifier",
+                                  id: 1,
+                                },
+                                immediately_activate: { type: "bool", id: 2 },
+                              },
+                            },
                           },
                         },
                       },
@@ -174,8 +176,16 @@ function componentCatalog(limit = MAX_SEED_LISTINGS) {
       if (row.published === false) continue;
       const typeID = Number(row.typeID) || 0;
       const basePrice = Number(row.basePrice) || 0;
-      if (!(typeID > 0) || !(basePrice > 0)) continue;
-      out.push({ typeID, basePrice, bundleSize: 1, stock: 100 });
+      if (!(typeID > 0)) continue;
+      // This item-type table carries 0 for a component's base price, so the world
+      // prices a design element itself. It is a stated world price, not a claim that
+      // CCP published it; where a base price does exist it wins.
+      out.push({
+        typeID,
+        basePrice: basePrice > 0 ? basePrice : DEFAULT_COMPONENT_PRICE_ISK,
+        bundleSize: 1,
+        stock: 100,
+      });
     }
     return out;
   } catch (_error) {
