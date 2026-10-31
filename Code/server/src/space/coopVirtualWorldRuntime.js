@@ -1742,6 +1742,11 @@ function advanceNativeWarGarrison(){
  if(!nativeWarFleetRegistry())return warSkip("garrison","NO_WAR_FLEET_REGISTRY");
  if(!identityRegistry)return warSkip("garrison","NO_IDENTITY_REGISTRY");
  if(!warGarrison)warGarrison=garrison.createWarGarrison({
+  // FW-132 (measured 2026-10-31T15:25Z): one side per tick meant a fresh front needed two
+  // full cycles before BOTH sides existed, so five PREPARING fronts sat WAITING while the
+  // single slot rotated between them and the assault never began. Two sides per tick is
+  // still one sanctioned spawn per side, and it lets a front muster in one cycle.
+  maxSpawnsPerTick:2,
   readWarState:()=>warStateStore().read(),
   registry:nativeWarFleetRegistry(),
   // FW-115: a commander spawns the formation its EARNED merit allows (recruit 1, pilot 2,
