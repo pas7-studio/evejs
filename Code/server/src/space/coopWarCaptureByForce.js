@@ -58,7 +58,12 @@ function createWarCaptureByForce({
         core.validateState(war);
         const fleet = tx.get(warStore.TABLE, fleetStore.KEY);
         const ships = fleet && fleet.version === 1 ? Object.values(fleet.ships || {}) : [];
-        const casualties = tx.get(warStore.TABLE, casualtyLedger.KEY);
+        // FW-136: read the ledger through its own authority. A flat row that is missing
+        // from SQLite while a validated copy exists in the cache is healed here, instead
+        // of answering NO_DEFENDER_WRECK on five fronts that each hold a real wreck.
+        const casualties = typeof casualtyLedger.readLedgerRow === "function"
+          ? casualtyLedger.readLedgerRow({ tx, gameStore })
+          : tx.get(warStore.TABLE, casualtyLedger.KEY);
         const wrecks = casualties && casualties.version === 1
           ? Object.values(casualties.byWreck || {}) : [];
         const captured = [], skips = [];

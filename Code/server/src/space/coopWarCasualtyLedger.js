@@ -30,6 +30,31 @@ function validate(s){
  }
  return s;
 }
+// FW-136 (measured 2026-10-31T16:52Z): the flat casualty row can be ABSENT from
+// SQLite while a validated copy of the very same document still sits in the legacy
+// "coop-faction-war" row group the in-memory cache was built from. Every atomic
+// reader (capture-by-force, this ledger itself) then saw an empty ledger: the
+// defender wrecks were invisible, capture-by-force answered NO_DEFENDER_WRECK for
+// five live fronts, and a replayed wreck would have been recorded twice because the
+// "victim already recorded" guard had nothing to compare against.
+//
+// The cache copy is a persisted document, not an invention, so a missing durable row
+// is healed from it inside the caller's own transaction. A row that is present is
+// always authoritative and is never replaced.
+function readLedgerRow({tx=null,gameStore=null}={}){
+ const durable=tx&&typeof tx.get==="function"?tx.get(TABLE,KEY):null;
+ if(durable)return validate(durable);
+ if(!gameStore)return empty();
+ let cached=null;
+ try{
+  const {readRow}=require("./coopNativeRowPath"+
+   (__filename.endsWith(".js")?"":".cjs"));
+  cached=readRow(gameStore,TABLE,KEY,validate);
+ }catch(_error){cached=null}
+ if(!cached)return empty();
+ if(tx&&typeof tx.put==="function")tx.put(TABLE,KEY,cached);
+ return validate(cached);
+}
 function createWarCasualtyLedger({gameStore,verifyNativeWreck,
  getFactionForCorporation,clock=()=>Date.now(),env=process.env}={}){
  if(typeof gameStore?.coopAtomicNativeRows?.transact!=="function"||
@@ -49,7 +74,7 @@ function createWarCasualtyLedger({gameStore,verifyNativeWreck,
   busy=true;
   try{
    return transact(tx=>{
-    const state=validate(tx.get(TABLE,KEY)||empty()),
+    const state=readLedgerRow({tx,gameStore}),
      known=own(state.byWreck,String(wreckID))?state.byWreck[String(wreckID)]:null;
     // A wreck is a globally unique native physical entity. A replay for
     // the exact same victim is safe even after the wreck was salvaged.
@@ -144,4 +169,4 @@ function createWarCasualtyLedger({gameStore,verifyNativeWreck,
  }
  return Object.freeze({record,assess});
 }
-module.exports={TABLE,KEY,empty,validate,createWarCasualtyLedger};
+module.exports={TABLE,KEY,empty,validate,readLedgerRow,createWarCasualtyLedger};
