@@ -73,7 +73,12 @@ function countsAsFailure(campaign) {
 function targetCooldownMs({ state, targetSystemID, baseMs = stallMs(),
   nowMs = Date.now() } = {}) {
   const target = num(targetSystemID);
-  const base = Math.max(1, num(baseMs) || 1);
+  // FW-128 (measured 2026-10-31T14:14:45Z): the border cooldown and the campaign stall
+  // were the same number, so 5 of the 8 live borders sat closed on their own history and
+  // the war answered NO_OPENABLE_FRONT for hours. A border now retries within 15 minutes
+  // and never waits longer than 30, while a campaign still gets the full stall to reach
+  // its assault - the war can always restart itself.
+  const base = Math.min(Math.max(1, num(baseMs) || 1), 15 * 60 * 1000);
   if (!pos(target) || !state || !state.campaigns) return base;
   // FW-127 (measured 2026-10-31T13:59:14Z): every expiry a border had EVER produced
   // counted towards its backoff, so after two days of fighting the multiplier reached
@@ -88,7 +93,7 @@ function targetCooldownMs({ state, targetSystemID, baseMs = stallMs(),
       (!num(campaign.expiredAt) || num(campaign.expiredAt) >= num(nowMs) - horizonMs))
     .length;
   if (!expired) return base;
-  return base * Math.min(4, Math.pow(2, Math.min(2, expired - 1)));
+  return base * Math.min(2, Math.pow(2, Math.min(1, expired - 1)));
 }
 
 // FW-100: the in-memory pacing map has to obey the same rule as the durable record.
