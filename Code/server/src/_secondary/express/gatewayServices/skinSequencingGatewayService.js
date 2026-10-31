@@ -210,6 +210,16 @@ const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
                                       },
                                     },
                                     CompleteEarlyResponse: { fields: {} },
+                                    // The client subscribes to this (sequencing notices): without it the
+                                    // job only appears after the window is reopened.
+                                    StartedNotice: {
+                                      fields: {
+                                        id: {
+                                          type: "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.Identifier",
+                                          id: 1,
+                                        },
+                                      },
+                                    },
                                   },
                                 },
                               },
@@ -370,7 +380,19 @@ function createSkinSequencingGatewayService(context = {}) {
     earlyCompletionPricingResponse: SEQUENCING_PROTO_ROOT.lookupType(
       `${QUOTE_API}.GetEarlyCompletionPricingResponse`,
     ),
+    startedNotice: SEQUENCING_PROTO_ROOT.lookupType(`${JOB_API}.StartedNotice`),
   };
+
+  // Told to the character that started the job, so its window shows the job at once. Published
+  // only when the store really started one; a refusal announces nothing.
+  function publishStarted(characterID, job) {
+    if (typeof context.publishGatewayNotice !== "function") return;
+    context.publishGatewayNotice(
+      `${JOB_API}.StartedNotice`,
+      encodePayload(types.startedNotice, { id: jobIdentifier(job) }),
+      { character: Number(characterID) || 0 },
+    );
+  }
 
   function payloadOf(requestEnvelope) {
     return (requestEnvelope && requestEnvelope.payload && requestEnvelope.payload.value) ||
@@ -469,6 +491,7 @@ function createSkinSequencingGatewayService(context = {}) {
         }
         const attributes = jobAttributes(result.job);
         attributes.sequencer = { sequential: activeCharacterID };
+        publishStarted(activeCharacterID, result.job);
         return ok(`${JOB_API}.InitiateResponse`, types.initiateResponse, {
           id: jobIdentifier(result.job),
           attributes,
