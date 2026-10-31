@@ -213,7 +213,11 @@ function warTreasuryStore(){
    // The payer must be a real member of the faction that owns this escrow, and
    // the campaign must be a real campaign of that war. The event proof itself
    // (a strictly proven native kill or casualty) is checked by the caller.
-   if(!Number.isSafeInteger(Number(pilotID))||!campaign)return false;
+   // FW-125 (measured 2026-10-31): a co-op war pilot is a STRING ("coop-pilot-060"),
+   // so Number.isSafeInteger(pilotID) was false for every real native kill and every
+   // bounty answered WAR_TREASURY_PAYOUT_NOT_AUTHORIZED while its escrow sat HELD.
+   // The shared war-pilot predicate is the same one the merit ledger already uses.
+   if(!isWarPilotRef(pilotID)||!campaign)return false;
    const faction=warPilotFaction(pilotID);
    return Number.isSafeInteger(faction)&&faction===Number(factionID);
   }
@@ -221,6 +225,12 @@ function warTreasuryStore(){
  return warTreasuryInstance;
 }
 
+// FW-125: one predicate for "this is a real war participant", shared with the merit
+// ledger, so a named co-op pilot is never mistaken for an invalid id.
+function isWarPilotRef(value){
+ try{return require("./coopWarPilotID"+siblingSuffix).isWarPilotID(value)===true}
+ catch(_error){return false}
+}
 function warPilotFaction(pilotID){
  if(!identityRegistry)return 0;
  const npcStore=require("./npc/nativeNpcStore"),
@@ -233,6 +243,15 @@ function warPilotFaction(pilotID){
    if(Number.isSafeInteger(faction)&&faction>0)return faction;
   }catch(_error){/* one bad link never decides a faction */}
  }
+ // FW-125: the identity link is released with the confirmed wreck, but the war fleet
+ // registry row is the SAME proven assignment and keeps the faction it was mobilised
+ // for - so a pilot is still a member when its payout is decided after the kill.
+ try{
+  const rows=nativeWarFleetRegistry()?.snapshot?.()?.ships||{};
+  const row=Object.values(rows).find(r=>String(r&&r.pilotID)===String(pilotID));
+  const faction=Number(row&&row.factionID);
+  if(Number.isSafeInteger(faction)&&faction>0)return faction;
+ }catch(_error){/* a missing registry is simply no faction */}
  return 0;
 }
 
