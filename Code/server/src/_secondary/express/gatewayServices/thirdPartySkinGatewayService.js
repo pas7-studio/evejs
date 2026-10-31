@@ -81,6 +81,44 @@ const SKIN_LICENSE_PROTO_ROOT = protobuf.Root.fromJSON({
                             },
                             api: {
                               nested: {
+                                // The client subscribes to these (shipSkinLicenseNoticeMessenger): without
+                                // them a licence only appears when the collection is reopened.
+                                AddedNotice: {
+                                  fields: {
+                                    id: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.license.Identifier",
+                                      id: 1,
+                                    },
+                                    attributes: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.license.Attributes",
+                                      id: 2,
+                                    },
+                                  },
+                                },
+                                UpdatedNotice: {
+                                  fields: {
+                                    id: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.license.Identifier",
+                                      id: 1,
+                                    },
+                                    attributes: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.license.Attributes",
+                                      id: 2,
+                                    },
+                                    previous_attributes: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.license.Attributes",
+                                      id: 3,
+                                    },
+                                  },
+                                },
+                                DeletedNotice: {
+                                  fields: {
+                                    id: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.license.Identifier",
+                                      id: 1,
+                                    },
+                                  },
+                                },
                                 GetOwnedRequest: { fields: {} },
                                 GetOwnedResponse: {
                                   fields: {
@@ -233,7 +271,19 @@ function createThirdPartySkinGatewayService(context = {}) {
     revokeRequest: SKIN_LICENSE_PROTO_ROOT.lookupType(`${API}.admin.RevokeRequest`),
     applyRequest: SKIN_LICENSE_PROTO_ROOT.lookupType(`${API}.ApplyRequest`),
     unapplyRequest: SKIN_LICENSE_PROTO_ROOT.lookupType(`${API}.UnapplyRequest`),
+    addedNotice: SKIN_LICENSE_PROTO_ROOT.lookupType(`${API}.AddedNotice`),
+    updatedNotice: SKIN_LICENSE_PROTO_ROOT.lookupType(`${API}.UpdatedNotice`),
+    deletedNotice: SKIN_LICENSE_PROTO_ROOT.lookupType(`${API}.DeletedNotice`),
   };
+
+  // Every licence notice is about one character's own collection, so only that character hears it.
+  // Nothing is announced unless the store really changed the row.
+  function publishLicence(typeName, type, payload, characterID) {
+    if (typeof context.publishGatewayNotice !== "function") return;
+    const owner = Number(characterID) || 0;
+    if (!(Number.isSafeInteger(owner) && owner > 0)) return;
+    context.publishGatewayNotice(typeName, encodePayload(type, payload), { character: owner });
+  }
 
   function decode(type, requestEnvelope) {
     return type.decode(
@@ -303,11 +353,19 @@ function createThirdPartySkinGatewayService(context = {}) {
 
       if (requestTypeName === `${API}.ActivateRequest`) {
         const decoded = decode(types.activateRequest, requestEnvelope);
-        const result = skins.activate(
-          activeCharacterID,
-          decoded && decoded.license && decoded.license.skin && decoded.license.skin.hex,
-        );
+        const skinHex = decoded && decoded.license && decoded.license.skin && decoded.license.skin.hex;
+        const before = skins.get(activeCharacterID, skinHex);
+        const result = skins.activate(activeCharacterID, skinHex);
         if (result.status === "ACTIVATED") {
+          const after = skins.get(activeCharacterID, skinHex);
+          if (after) {
+            publishLicence("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice",
+              types.updatedNotice, {
+                id: licenseIdentifier(activeCharacterID, skinHex),
+                attributes: buildAttributes(after),
+                previous_attributes: before ? buildAttributes(before) : undefined,
+              }, activeCharacterID);
+          }
           return ok(`${API}.ActivateResponse`);
         }
         const responseTypeName = `${API}.ActivateResponse`;
@@ -328,6 +386,11 @@ function createThirdPartySkinGatewayService(context = {}) {
           unactivated: Number(decoded && decoded.unactivated) || 0,
         });
         if (result.status === "GRANTED") {
+          publishLicence("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice",
+            types.addedNotice, {
+              id: licenseIdentifier(activeCharacterID, result.licence.skin),
+              attributes: buildAttributes(result.licence),
+            }, activeCharacterID);
           return ok(`${API}.admin.GrantResponse`, types.grantResponse, {
             license: licenseIdentifier(activeCharacterID, result.licence.skin),
           });
@@ -384,11 +447,12 @@ function createThirdPartySkinGatewayService(context = {}) {
       }
 
       const decoded = decode(types.revokeRequest, requestEnvelope);
-      const result = skins.revoke(
-        activeCharacterID,
-        decoded && decoded.license && decoded.license.skin && decoded.license.skin.hex,
-      );
+      const skinHex = decoded && decoded.license && decoded.license.skin && decoded.license.skin.hex;
+      const result = skins.revoke(activeCharacterID, skinHex);
       if (result.status === "REVOKED") {
+        publishLicence("eve_public.cosmetic.ship.skin.thirdparty.license.api.DeletedNotice",
+          types.deletedNotice, { id: licenseIdentifier(activeCharacterID, skinHex) },
+          activeCharacterID);
         return ok(`${API}.admin.RevokeResponse`);
       }
       return error(result.status === "NOT_FOUND" ? 5 : 13,

@@ -292,6 +292,11 @@ function createSkinListingGatewayService(context = {}) {
     __dirname,
     "../../../space/coopSkinListings",
   )).shared();
+  const skins = context.thirdPartySkins || require(path.join(
+    __dirname,
+    "../../../space/coopThirdPartySkins",
+  )).shared();
+  const licences = require(path.join(__dirname, "thirdPartySkinGatewayService.js"));
   const types = {
     getAllResponse: SKIN_LISTING_PROTO_ROOT.lookupType(`${LISTING_API}.GetAllResponse`),
     getAllOwnedResponse: SKIN_LISTING_PROTO_ROOT.lookupType(`${LISTING_API}.GetAllOwnedResponse`),
@@ -314,6 +319,29 @@ function createSkinListingGatewayService(context = {}) {
       `${LISTING_API}.admin.SetExpirationRequest`,
     ),
   };
+
+  // A real purchase adds a licence to the buyer's own collection, and the collection only learns
+  // about it through this notice. Nothing is announced if the row is not really there.
+  function publishLicenceAdded(characterID, skinHex) {
+    if (typeof context.publishGatewayNotice !== "function") return;
+    const owner = Number(characterID) || 0;
+    if (!(Number.isSafeInteger(owner) && owner > 0)) return;
+    const row = skins.get(owner, skinHex);
+    if (!row) return;
+    context.publishGatewayNotice(
+      "eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice",
+      encodePayload(
+        licences.SKIN_LICENSE_PROTO_ROOT.lookupType(
+          "eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice",
+        ),
+        {
+          id: licences.licenseIdentifier(owner, skinHex),
+          attributes: licences.buildAttributes(row),
+        },
+      ),
+      { character: owner },
+    );
+  }
 
   function decode(type, requestEnvelope) {
     return type.decode(
@@ -444,11 +472,11 @@ function createSkinListingGatewayService(context = {}) {
           }
           return refusalFor(result.status, responseTypeName);
         }
+        publishLicenceAdded(activeCharacterID, result.skin);
         return ok(`${LISTING_API}.InitiatePurchaseListingResponse`, types.purchaseResponse, {
           transaction: { uuid: Buffer.from(result.transaction, "hex") },
         });
       }
-
       const decoded = decode(types.expirationRequest, requestEnvelope);
       const result = listings.setExpiration(
         activeCharacterID,
