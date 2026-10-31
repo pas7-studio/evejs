@@ -19,6 +19,11 @@ const {
 
 const API = "eve_public.cosmetic.character.title.api";
 
+// Spelled out: the notice audit scans for these literal names, and a template string hides them.
+const SET_NOTICE_TYPE = "eve_public.cosmetic.character.title.api.SetNotice";
+const GRANTED_NOTICE_TYPE = "eve_public.cosmetic.character.title.api.GrantedNotice";
+const REVOKED_NOTICE_TYPE = "eve_public.cosmetic.character.title.api.RevokedNotice";
+
 const TITLE_PROTO_ROOT = protobuf.Root.fromJSON({
   nested: {
     eve_public: {
@@ -74,6 +79,36 @@ const TITLE_PROTO_ROOT = protobuf.Root.fromJSON({
                               id: 1,
                             },
                             no_title: { type: "bool", id: 2 },
+                          },
+                        },
+                        // The client subscribes to these (title.api notices). Shapes read from
+                        // the client's notices proto, not guessed: SetNotice carries the
+                        // character whose displayed title changed plus a title/no_title oneof,
+                        // and the granted/revoked pair carries the catalogue title only.
+                        SetNotice: {
+                          fields: {
+                            character: { type: "eve_public.character.Identifier", id: 1 },
+                            title: {
+                              type: "eve_public.cosmetic.character.title.definition.Identifier",
+                              id: 2,
+                            },
+                            no_title: { type: "bool", id: 3 },
+                          },
+                        },
+                        GrantedNotice: {
+                          fields: {
+                            title: {
+                              type: "eve_public.cosmetic.character.title.definition.Identifier",
+                              id: 1,
+                            },
+                          },
+                        },
+                        RevokedNotice: {
+                          fields: {
+                            title: {
+                              type: "eve_public.cosmetic.character.title.definition.Identifier",
+                              id: 1,
+                            },
                           },
                         },
                         SetRequest: {
@@ -133,7 +168,9 @@ const HANDLED_REQUEST_TYPES = Object.freeze([
 ]);
 
 function identifierOf(uuid) {
-  return { uuid: Buffer.from(String(uuid || ""), "hex") };
+  // The store keeps hex text; a request carries raw bytes. Both must yield the same 16 bytes.
+  const hex = Buffer.isBuffer(uuid) ? uuid.toString("hex") : String(uuid || "");
+  return { uuid: Buffer.from(hex, "hex") };
 }
 
 function createCharacterTitleGatewayService(context = {}) {
@@ -148,7 +185,53 @@ function createCharacterTitleGatewayService(context = {}) {
     equippedResponse: TITLE_PROTO_ROOT.lookupType(`${API}.GetEquippedForCharacterResponse`),
     grantRequest: TITLE_PROTO_ROOT.lookupType(`${API}.admin.GrantRequest`),
     revokeRequest: TITLE_PROTO_ROOT.lookupType(`${API}.admin.RevokeRequest`),
+    setNotice: TITLE_PROTO_ROOT.lookupType(`${API}.SetNotice`),
+    grantedNotice: TITLE_PROTO_ROOT.lookupType(`${API}.GrantedNotice`),
+    revokedNotice: TITLE_PROTO_ROOT.lookupType(`${API}.RevokedNotice`),
   };
+
+  // A worn title is visible to everyone who can see the character, so the solar system is the
+  // honest audience. The session lookup is done lazily: it reaches the game store, and a title
+  // change must still be announced (to the owner only) when that lookup is unavailable.
+  function noticeTargetFor(characterID) {
+    try {
+      const { getCurrentSolarSystemID } = require(path.join(
+        __dirname,
+        "../../../services/chat/channelRules",
+      ));
+      const sessionRegistry = require(path.join(
+        __dirname,
+        "../../../services/chat/sessionRegistry",
+      ));
+      const session = sessionRegistry.findSessionByCharacterID(characterID);
+      const solarSystemID = session ? getCurrentSolarSystemID(session) : 0;
+      if (Number.isSafeInteger(solarSystemID) && solarSystemID > 0) {
+        return { solar_system: solarSystemID };
+      }
+    } catch (error) {
+      // No session lookup: tell the owner instead of guessing an audience.
+    }
+    return { character: characterID };
+  }
+
+  function publishNotice(typeName, messageType, payload, characterID) {
+    if (typeof context.publishGatewayNotice !== "function") return;
+    const owner = Number(characterID) || 0;
+    if (!(Number.isSafeInteger(owner) && owner > 0)) return;
+    context.publishGatewayNotice(
+      typeName,
+      encodePayload(messageType, payload),
+      noticeTargetFor(owner),
+    );
+  }
+
+  // Told only after the store really wrote the change; a refusal announces nothing.
+  function publishSet(characterID, uuid) {
+    const payload = uuid
+      ? { character: { sequential: Number(characterID) || 0 }, title: identifierOf(uuid) }
+      : { character: { sequential: Number(characterID) || 0 }, no_title: true };
+    publishNotice(SET_NOTICE_TYPE, types.setNotice, payload, characterID);
+  }
 
   function decode(type, requestEnvelope) {
     return type.decode(
@@ -213,13 +296,19 @@ function createCharacterTitleGatewayService(context = {}) {
           activeCharacterID,
           decoded && decoded.title && decoded.title.uuid,
         );
-        if (result.status === "EQUIPPED") return ok(`${API}.EquipResponse`);
+        if (result.status === "EQUIPPED") {
+          publishSet(activeCharacterID, result.title);
+          return ok(`${API}.EquipResponse`);
+        }
         return refusalFor(result.status, `${API}.EquipResponse`);
       }
 
       if (requestTypeName === `${API}.UnequipRequest`) {
         const result = titles.unequip(activeCharacterID);
-        if (result.status === "UNEQUIPPED") return ok(`${API}.UnequipResponse`);
+        if (result.status === "UNEQUIPPED") {
+          publishSet(activeCharacterID, "");
+          return ok(`${API}.UnequipResponse`);
+        }
         return refusalFor(result.status, `${API}.UnequipResponse`);
       }
 
@@ -242,6 +331,14 @@ function createCharacterTitleGatewayService(context = {}) {
         : titles.revoke(activeCharacterID, uuid);
       const expected = grant ? "GRANTED" : "REVOKED";
       if (result.status === expected) {
+        // The owned list changed, so the client must hear it now: Grant/Revoke are the only
+        // ways a catalogue title appears or disappears.
+        publishNotice(
+          grant ? GRANTED_NOTICE_TYPE : REVOKED_NOTICE_TYPE,
+          grant ? types.grantedNotice : types.revokedNotice,
+          { title: identifierOf(uuid) },
+          activeCharacterID,
+        );
         return ok(grant ? `${API}.admin.GrantResponse` : `${API}.admin.RevokeResponse`);
       }
       return refusalFor(result.status,
