@@ -45,6 +45,7 @@ const HANDLED_REQUEST_TYPES = Object.freeze([
   "eve_public.sovereignty.hub.api.GetResourcesRequest",
   "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
   "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
+  "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest",
   "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
   "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest",
   "eve_public.sovereignty.hub.upgrade.api.GetRequest",
@@ -587,6 +588,22 @@ function createSovereigntyGatewayService({ publishGatewayNotice }) {
             configurations: staticSnapshot.starConfigurations.map(
               buildStarConfigurationPayload,
             ),
+          }),
+        };
+      }
+
+      if (requestTypeName === "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest") {
+        // The client's own proto marks this call deprecated in favour of the star-level one,
+        // which this world does answer with real skyhook/star configurations. There are no
+        // planet-level resource configurations in this world, so the honest list is empty -
+        // not a row invented to make the window look alive.
+        return {
+          statusCode: 200,
+          statusMessage: "",
+          responseTypeName:
+            "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsResponse",
+          responsePayloadBuffer: encodePayload(types.planetGetAllConfigurationsResponse, {
+            configurations: [],
           }),
         };
       }

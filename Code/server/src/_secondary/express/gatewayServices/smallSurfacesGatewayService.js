@@ -12,6 +12,7 @@ const protobuf = require("protobufjs");
 
 const RECOMMENDATION_API = "eve_public.operation.recommendation";
 const COMMUNITY_API = "eve_public.communitytrack.api";
+const ASSISTANT_API = "eve_public.ai.assistant.chat.api";
 
 const SMALL_SURFACES_PROTO_ROOT = protobuf.Root.fromJSON({
   nested: {
@@ -76,6 +77,29 @@ const SMALL_SURFACES_PROTO_ROOT = protobuf.Root.fromJSON({
             },
           },
         },
+        ai: {
+          nested: {
+            assistant: {
+              nested: {
+                chat: {
+                  nested: {
+                    api: {
+                      nested: {
+                        QueryRequest: { fields: { message: { type: "string", id: 1 } } },
+                        QueryResponse: {
+                          fields: {
+                            response: { type: "string", id: 1 },
+                            fallback: { type: "bool", id: 2 },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     },
   },
@@ -85,6 +109,7 @@ const SMALL_SURFACES_PROTO_ROOT = protobuf.Root.fromJSON({
 const HANDLED_REQUEST_TYPES = Object.freeze([
   "eve_public.operation.recommendation.GetRequest",
   "eve_public.communitytrack.api.GetRequest",
+  "eve_public.ai.assistant.chat.api.QueryRequest",
 ]);
 
 function createSmallSurfacesGatewayService() {
@@ -114,6 +139,18 @@ function createSmallSurfacesGatewayService() {
           statusMessage: "",
           responseTypeName: `${RECOMMENDATION_API}.GetResponse`,
           responsePayloadBuffer: Buffer.from(payload),
+        };
+      }
+
+      if (requestTypeName === `${ASSISTANT_API}.QueryRequest`) {
+        // Aura guidance answers with a formatted message produced by an AI service. This world
+        // runs no such service and has no message to formulate, so the call is NOT_IMPLEMENTED
+        // with the reason. Inventing a friendly "answer" would be a fabricated AI response.
+        return {
+          statusCode: 501,
+          statusMessage: "this world has no AI assistant service",
+          responseTypeName: `${ASSISTANT_API}.QueryResponse`,
+          responsePayloadBuffer: Buffer.alloc(0),
         };
       }
 

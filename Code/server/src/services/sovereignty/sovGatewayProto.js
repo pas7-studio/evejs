@@ -67,6 +67,11 @@ function getSovereigntyProtoTypes() {
     planetGetDefinitionsVersionResponse: root.lookupType(
       "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse",
     ),
+    // The deprecated planet-level configuration list. It is answered (with an empty list) so
+    // the client is told "there are none" instead of waiting for a surface we never answer.
+    planetGetAllConfigurationsResponse: root.lookupType(
+      "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsResponse",
+    ),
     starGetAllConfigurationsRequest: root.lookupType(
       "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
     ),

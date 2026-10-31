@@ -21,6 +21,45 @@ const FREELANCE_CREATION_PRICES = Object.freeze({
   broadcastingFeePerDayPerLocation: 100000,
 });
 
+// eve_public.freelance.contributionmethod.itemdelivery.api.Deliver: handing items to a project.
+//
+// This world has no freelance project system at all - no project can be created, listed or
+// committed to - so a delivery cannot name a project that exists. The client's own response
+// carries a oneof for exactly that case, and `project_does_not_exist` is the truthful branch:
+// it is not a generic error, and it does not pretend the items were escrowed.
+const DELIVER_API = "eve_public.freelance.contributionmethod.itemdelivery.api";
+const DELIVER_PROTO_ROOT = protobuf.Root.fromJSON({
+  nested: {
+    eve_public: {
+      nested: {
+        freelance: {
+          nested: {
+            contributionmethod: {
+              nested: {
+                itemdelivery: {
+                  nested: {
+                    api: {
+                      nested: {
+                        DeliverResponse: {
+                          oneofs: { result: { oneof: ["project_does_not_exist"] } },
+                          fields: {
+                            project_does_not_exist: { type: "ProjectDoesNotExist", id: 13 },
+                          },
+                          nested: { ProjectDoesNotExist: { fields: {} } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+});
+
 const EMPTY_SUCCESS_RESPONSE_TYPES = new Map([
   [
     "eve_public.freelance.project.api.GetAllActiveForCorporationRequest",
@@ -219,6 +258,9 @@ function createFreelanceGatewayService({ emptyPayload }) {
   const GetCreationPricesResponse = protoRoot.lookupType(
     "eve_public.freelance.project.api.GetCreationPricesResponse",
   );
+  const DeliverResponse = DELIVER_PROTO_ROOT.lookupType(
+    `${DELIVER_API}.DeliverResponse`,
+  );
 
   return {
     name: "freelance-projects",
@@ -226,6 +268,7 @@ function createFreelanceGatewayService({ emptyPayload }) {
       "eve_public.freelance.project.api.GetCommitLimitsRequest",
       "eve_public.freelance.project.api.GetCreationLimitsRequest",
       "eve_public.freelance.project.api.GetCreationPricesRequest",
+      `${DELIVER_API}.DeliverRequest`,
       ...EMPTY_SUCCESS_RESPONSE_TYPES.keys(),
     ],
     getEmptySuccessResponseType(requestTypeName) {
@@ -287,6 +330,17 @@ function createFreelanceGatewayService({ emptyPayload }) {
                 FREELANCE_CREATION_PRICES.broadcastingFeePerDayPerLocation,
               ),
             },
+          }),
+        };
+      }
+
+      if (requestTypeName === `${DELIVER_API}.DeliverRequest`) {
+        return {
+          statusCode: 200,
+          statusMessage: "",
+          responseTypeName: `${DELIVER_API}.DeliverResponse`,
+          responsePayloadBuffer: encodePayload(DeliverResponse, {
+            project_does_not_exist: {},
           }),
         };
       }

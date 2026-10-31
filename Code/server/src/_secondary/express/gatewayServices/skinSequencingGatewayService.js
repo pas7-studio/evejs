@@ -16,6 +16,7 @@ const path = require("path");
 const protobuf = require("protobufjs");
 
 const {
+  durationFromMs,
   encodePayload,
   getActiveCharacterID,
 } = require("./gatewayServiceHelpers");
@@ -23,7 +24,14 @@ const { rawLayoutField } = require("./thirdPartySkinDraftGatewayService");
 
 const JOB = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job";
 const JOB_API = `${JOB}.api`;
+const QUOTE_API = "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api";
 const COMPONENT = "eve_public.cosmetic.ship.skin.thirdparty.component";
+// A design's tier level is computed by the client from its own threshold table and is not
+// something the server can observe. The world charges no PLEX for any tier and runs one fixed
+// duration for every job, so the table is the same true answer for every level; it is published
+// for 1..10 because the client indexes the answer by the design's level and a missing key would
+// break the window, while an extra key just repeats the same truth.
+const QUOTE_TIER_LEVELS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
 const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
   nested: {
@@ -32,6 +40,12 @@ const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
         protobuf: {
           nested: {
             Timestamp: {
+              fields: {
+                seconds: { type: "int64", id: 1 },
+                nanos: { type: "int32", id: 2 },
+              },
+            },
+            Duration: {
               fields: {
                 seconds: { type: "int64", id: 1 },
                 nanos: { type: "int32", id: 2 },
@@ -48,6 +62,11 @@ const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
             Identifier: { fields: { sequential: { type: "uint32", id: 1 } } },
           },
         },
+        plex: {
+          nested: {
+            Currency: { fields: { total_in_cents: { type: "uint64", id: 1 } } },
+          },
+        },
         cosmetic: {
           nested: {
             ship: {
@@ -57,6 +76,7 @@ const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
                     thirdparty: {
                       nested: {
                         Identifier: { fields: { hex: { type: "string", id: 1 } } },
+                        Tier: { fields: { level: { type: "uint32", id: 1 } } },
                         component: {
                           nested: {
                             coating: {
@@ -194,6 +214,83 @@ const SEQUENCING_PROTO_ROOT = protobuf.Root.fromJSON({
                                 },
                               },
                             },
+                        // The quotes the client asks for before the sequencing window opens.
+                        // This world charges no PLEX for sequencing - the price is paid in
+                        // component licences, spent by Initiate - and every job runs the store's
+                        // one fixed duration. So every tier answers "0 PLEX" and that duration.
+                        api: {
+                          nested: {
+                            GetTierPricingRequest: { fields: {} },
+                            GetTierPricingResponse: {
+                              fields: {
+                                prices: {
+                                  rule: "repeated",
+                                  type: "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse.Price",
+                                  id: 1,
+                                },
+                                discount_percentage_applied: { type: "uint32", id: 2 },
+                              },
+                              nested: {
+                                Price: {
+                                  fields: {
+                                    tier: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.Tier",
+                                      id: 1,
+                                    },
+                                    plex: { type: "eve_public.plex.Currency", id: 2 },
+                                  },
+                                },
+                              },
+                            },
+                            GetTierDurationsRequest: { fields: {} },
+                            GetTierDurationsResponse: {
+                              fields: {
+                                durations: {
+                                  rule: "repeated",
+                                  type: "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsResponse.Duration",
+                                  id: 1,
+                                },
+                                discount_percentage_applied: { type: "uint32", id: 2 },
+                              },
+                              nested: {
+                                Duration: {
+                                  fields: {
+                                    tier: {
+                                      type: "eve_public.cosmetic.ship.skin.thirdparty.Tier",
+                                      id: 1,
+                                    },
+                                    duration: { type: "google.protobuf.Duration", id: 2 },
+                                  },
+                                },
+                              },
+                            },
+                            GetEarlyCompletionPricingRequest: { fields: {} },
+                            GetEarlyCompletionPricingResponse: {
+                              fields: {
+                                prices: {
+                                  rule: "repeated",
+                                  type: "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingResponse.Price",
+                                  id: 1,
+                                },
+                              },
+                              nested: {
+                                Price: {
+                                  fields: {
+                                    remaining_greater: {
+                                      type: "google.protobuf.Duration",
+                                      id: 1,
+                                    },
+                                    remaining_lesser_or_equal: {
+                                      type: "google.protobuf.Duration",
+                                      id: 2,
+                                    },
+                                    plex: { type: "eve_public.plex.Currency", id: 3 },
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        },
                           },
                         },
                       },
@@ -215,6 +312,9 @@ const HANDLED_REQUEST_TYPES = Object.freeze([
   "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetRequest",
   "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveRequest",
   "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest",
+  "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
+  "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsRequest",
+  "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingRequest",
 ]);
 
 function timestampOf(ms) {
@@ -265,6 +365,11 @@ function createSkinSequencingGatewayService(context = {}) {
     initiateRequest: SEQUENCING_PROTO_ROOT.lookupType(`${JOB_API}.InitiateRequest`),
     initiateResponse: SEQUENCING_PROTO_ROOT.lookupType(`${JOB_API}.InitiateResponse`),
     completeEarlyRequest: SEQUENCING_PROTO_ROOT.lookupType(`${JOB_API}.CompleteEarlyRequest`),
+    tierPricingResponse: SEQUENCING_PROTO_ROOT.lookupType(`${QUOTE_API}.GetTierPricingResponse`),
+    tierDurationsResponse: SEQUENCING_PROTO_ROOT.lookupType(`${QUOTE_API}.GetTierDurationsResponse`),
+    earlyCompletionPricingResponse: SEQUENCING_PROTO_ROOT.lookupType(
+      `${QUOTE_API}.GetEarlyCompletionPricingResponse`,
+    ),
   };
 
   function payloadOf(requestEnvelope) {
@@ -368,6 +473,47 @@ function createSkinSequencingGatewayService(context = {}) {
           id: jobIdentifier(result.job),
           attributes,
         });
+      }
+
+      if (requestTypeName === `${QUOTE_API}.GetTierPricingRequest`) {
+        // Measured: nothing is charged in PLEX. The price of a sequencing job in this world is
+        // component licences, and Initiate spends them before the job exists.
+        return ok(`${QUOTE_API}.GetTierPricingResponse`, types.tierPricingResponse, {
+          prices: QUOTE_TIER_LEVELS.map((level) => ({
+            tier: { level },
+            plex: { total_in_cents: 0 },
+          })),
+          discount_percentage_applied: 0,
+        });
+      }
+
+      if (requestTypeName === `${QUOTE_API}.GetTierDurationsRequest`) {
+        // The duration the store will really use, not a nominal one: the client shows this
+        // number and the job completes when that much time has passed.
+        const duration = durationFromMs(sequencing.durationMs());
+        return ok(`${QUOTE_API}.GetTierDurationsResponse`, types.tierDurationsResponse, {
+          durations: QUOTE_TIER_LEVELS.map((level) => ({
+            tier: { level },
+            duration,
+          })),
+          discount_percentage_applied: 0,
+        });
+      }
+
+      if (requestTypeName === `${QUOTE_API}.GetEarlyCompletionPricingRequest`) {
+        // CompleteEarly charges nothing, so the expedite price is zero for every remaining time
+        // up to a whole job. One window covers that: remaining > 0 and <= the job's duration.
+        return ok(
+          `${QUOTE_API}.GetEarlyCompletionPricingResponse`,
+          types.earlyCompletionPricingResponse,
+          {
+            prices: [{
+              remaining_greater: { seconds: 0, nanos: 0 },
+              remaining_lesser_or_equal: durationFromMs(sequencing.durationMs()),
+              plex: { total_in_cents: 0 },
+            }],
+          },
+        );
       }
 
       const decoded = decode(types.completeEarlyRequest, requestEnvelope);
