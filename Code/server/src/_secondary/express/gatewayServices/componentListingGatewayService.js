@@ -72,6 +72,20 @@ const PROTO_ROOT = protobuf.Root.fromJSON({
                 transaction: {
                   nested: {
                     Identifier: { fields: { uuid: { type: "bytes", id: 1 } } },
+                    api: {
+                      nested: {
+                        // The client subscribes to this: without it a purchase is only known
+                        // through the answer to the request that made it.
+                        TransactionSucceededNotice: {
+                          fields: {
+                            transaction: {
+                              type: "eve_public.cosmetic.market.transaction.Identifier",
+                              id: 1,
+                            },
+                          },
+                        },
+                      },
+                    },
                   },
                 },
                 component: {
@@ -203,7 +217,23 @@ function createComponentListingGatewayService(context = {}) {
     getAllResponse: PROTO_ROOT.lookupType(`${LISTING_API}.GetAllResponse`),
     purchaseRequest: PROTO_ROOT.lookupType(`${LISTING_API}.InitiatePurchaseListingRequest`),
     purchaseResponse: PROTO_ROOT.lookupType(`${LISTING_API}.InitiatePurchaseListingResponse`),
+    succeededNotice: PROTO_ROOT.lookupType(
+      "eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice",
+    ),
   };
+
+  // A refusal leaves no transaction behind (the id is minted only on a real sale), so only a
+  // completed purchase is announced. The buyer is the only one who can act on it.
+  function publishSucceeded(characterID, transaction) {
+    if (typeof context.publishGatewayNotice !== "function") return;
+    const owner = Number(characterID) || 0;
+    if (!(Number.isSafeInteger(owner) && owner > 0)) return;
+    context.publishGatewayNotice(
+      "eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice",
+      encodePayload(types.succeededNotice, { transaction }),
+      { character: owner },
+    );
+  }
 
   function encodePayload(type, payload) {
     const error = type.verify(payload);
@@ -285,9 +315,11 @@ function createComponentListingGatewayService(context = {}) {
         return refusal(result.status,
           "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse");
       }
+      const transaction = { uuid: uuidStringToBuffer(result.transactionUUID) };
+      publishSucceeded(characterID, transaction);
       return ok("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse",
         types.purchaseResponse, {
-          transaction: { uuid: uuidStringToBuffer(result.transactionUUID) },
+          transaction,
           immediately_activate: result.immediatelyActivate === true,
         });
     },
