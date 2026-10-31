@@ -4,17 +4,22 @@ const BaseService = require(path.join(__dirname, "../baseService"));
 const log = require(path.join(__dirname, "../../utils/logger"));
 const {
   buildDict,
+  buildKeyVal,
   buildList,
   normalizeNumber,
   normalizeText,
   unwrapMarshalValue,
 } = require(path.join(__dirname, "../_shared/serviceHelpers"));
+const store = require(path.join(__dirname, "./petitionerStore"));
 
+// The help window used to receive constants: MayPetition answered "disabled",
+// CreatePetition answered false and every list was empty, so a player could not
+// file a ticket at all. The handlers below read and write the durable store in
+// `petitionerStore`; nothing is invented and a refused change keeps the ticket
+// untouched.
 const HELP_CENTER_URL = "https://support.eveonline.com/hc/en-us";
 const SUBMIT_REQUEST_URL = `${HELP_CENTER_URL}/requests/new`;
-const MAY_PETITION_DISABLED = -4;
-const MAX_AUDIT_EVENTS = 200;
-const auditEvents = [];
+const MAY_PETITION_ALLOWED = 0;
 
 function toPositiveInteger(value, fallback = 0) {
   const numeric = Math.trunc(normalizeNumber(unwrapMarshalValue(value), fallback));
@@ -25,24 +30,9 @@ function toText(value, fallback = "") {
   return normalizeText(unwrapMarshalValue(value), fallback);
 }
 
-function safeClone(value) {
-  try {
-    return value === undefined ? null : JSON.parse(JSON.stringify(unwrapMarshalValue(value)));
-  } catch (error) {
-    return null;
-  }
-}
-
 function getSessionCharacterID(session) {
   return toPositiveInteger(
     session && (session.characterID || session.charid || session.clientID),
-    0,
-  );
-}
-
-function getSessionAccountID(session) {
-  return toPositiveInteger(
-    session && (session.userid || session.userID || session.accountID),
     0,
   );
 }
@@ -54,40 +44,25 @@ function kwargsToObject(kwargs) {
     : {};
 }
 
-function recordAuditEvent(kind, args = [], session = null, extra = {}) {
-  const event = {
-    eventID: auditEvents.length + 1,
-    kind,
-    characterID: getSessionCharacterID(session),
-    accountID: getSessionAccountID(session),
-    args: safeClone(args),
-    recordedAt: new Date().toISOString(),
-    ...extra,
-  };
-  auditEvents.push(event);
-  if (auditEvents.length > MAX_AUDIT_EVENTS) {
-    auditEvents.splice(0, auditEvents.length - MAX_AUDIT_EVENTS);
-  }
-  log.debug(
-    `[Petitioner] ${kind} char=${event.characterID || "?"} account=${event.accountID || "?"}`,
-  );
-  return event;
+function rowToKeyVal(row) {
+  return buildKeyVal(Object.entries(row || {}).map(([key, value]) => [
+    key,
+    value === undefined ? null : value,
+  ]));
 }
 
-function buildZendeskLink(kwargs = null) {
-  const ticketID = toPositiveInteger(kwargsToObject(kwargs).ticketID, 0);
-  if (ticketID) {
-    return `${HELP_CENTER_URL}/requests/${ticketID}`;
-  }
-  return SUBMIT_REQUEST_URL;
+function rowsToList(rows) {
+  return buildList((Array.isArray(rows) ? rows : []).map(rowToKeyVal));
 }
 
-function emptyList() {
-  return buildList([]);
-}
-
-function emptyDict() {
-  return buildDict([]);
+function categoryToList() {
+  return buildList(store.CATEGORIES.map((category) => buildKeyVal([
+    ["categoryID", category.categoryID],
+    ["categoryName", category.categoryName],
+    ["description", category.description],
+    ["primaryCategory", category.categoryName],
+    ["categoryHierarchy", [category.categoryID]],
+  ])));
 }
 
 class PetitionerService extends BaseService {
@@ -95,205 +70,219 @@ class PetitionerService extends BaseService {
     super("petitioner");
   }
 
-  Handle_IsSerenity(args, session) {
-    recordAuditEvent("is_serenity", args, session);
+  Handle_IsSerenity() {
     return false;
   }
 
-  Handle_IsZendeskEnabled(args, session) {
-    recordAuditEvent("is_zendesk_enabled", args, session);
+  Handle_IsZendeskEnabled() {
     return true;
   }
 
-  Handle_IsZendeskSwapEnabled(args, session) {
-    recordAuditEvent("is_zendesk_swap_enabled", args, session);
+  Handle_IsZendeskSwapEnabled() {
     return true;
   }
 
   Handle_HasOpenTickets(args, session) {
-    recordAuditEvent("has_open_tickets", args, session);
-    return false;
+    const characterID = getSessionCharacterID(session);
+    const open = store.listForPetitioner(characterID).filter((row) => !row.closed && !row.deleted);
+    return open.length > 0;
   }
 
   Handle_GetZendeskJwtLink(args, session, kwargs) {
-    const url = buildZendeskLink(kwargs);
-    recordAuditEvent("get_zendesk_jwt_link", args, session, { url });
-    return url;
+    const ticketID = toPositiveInteger(kwargsToObject(kwargs).ticketID, 0);
+    return ticketID ? `${HELP_CENTER_URL}/requests/${ticketID}` : SUBMIT_REQUEST_URL;
   }
 
   Handle_GetUnreadMessages(args, session) {
-    recordAuditEvent("get_unread_messages_empty", args, session);
-    return emptyList();
+    return rowsToList(store.listUnread(getSessionCharacterID(session)));
   }
 
   Handle_MarkAsRead(args, session) {
-    recordAuditEvent("mark_as_read_ack", args, session, {
-      messageID: toPositiveInteger(args && args[0], 0),
-    });
+    const result = store.markMessageRead(getSessionCharacterID(session), toPositiveInteger(args && args[0], 0));
+    if (!result.success) log.debug(`[Petitioner] MarkAsRead refused ${result.reason}`);
     return null;
   }
 
   Handle_GetMyPetitionsEx(args, session) {
-    recordAuditEvent("get_my_petitions_empty", args, session);
-    return emptyList();
+    return rowsToList(store.listForPetitioner(getSessionCharacterID(session)));
   }
 
   Handle_GetClaimedPetitions(args, session) {
-    recordAuditEvent("get_claimed_petitions_empty", args, session);
-    return emptyList();
+    return rowsToList(store.listClaimedBy(getSessionCharacterID(session)));
   }
 
-  Handle_GetPetitionQueue(args, session) {
-    recordAuditEvent("get_petition_queue_empty", args, session, {
-      queueID: toPositiveInteger(args && args[0], 0),
-    });
-    return emptyList();
+  Handle_GetPetitionQueue(args) {
+    return rowsToList(store.listQueue(toPositiveInteger(args && args[0], 1)));
   }
 
-  Handle_GetQueues(args, session) {
-    recordAuditEvent("get_queues_empty", args, session);
-    return emptyList();
+  Handle_GetQueues() {
+    return buildList([buildKeyVal([["queueID", 1], ["queueName", "General"]])]);
   }
 
-  Handle_GetCategories(args, session) {
-    recordAuditEvent("get_categories_empty", args, session);
-    return emptyList();
+  Handle_GetCategories() {
+    return categoryToList();
   }
 
-  Handle_GetCategoryHierarchicalInfo(args, session) {
-    recordAuditEvent("get_category_hierarchical_info_empty", args, session);
-    return [emptyDict(), emptyDict(), emptyDict(), emptyDict()];
+  Handle_GetCategoryHierarchicalInfo() {
+    return [buildDict([]), buildDict([]), buildDict([]), buildDict([])];
   }
 
-  Handle_GetCategoryProperties(args, session) {
-    recordAuditEvent("get_category_properties_empty", args, session, {
-      categoryID: toPositiveInteger(args && args[0], 0),
-    });
-    return emptyList();
+  Handle_GetCategoryProperties() {
+    // No category needs extra structured properties: subject and text are enough.
+    return buildList([]);
   }
 
-  Handle_PropertyPopulationInfo(args, session) {
-    recordAuditEvent("property_population_info_empty", args, session, {
-      propertyName: toText(args && args[0], ""),
-    });
-    return emptyList();
+  Handle_PropertyPopulationInfo() {
+    return buildList([]);
   }
 
-  Handle_GetClientPickerInfo(args, session) {
-    recordAuditEvent("get_client_picker_info_empty", args, session, {
-      filterString: toText(args && args[0], ""),
-      elementName: toText(args && args[1], ""),
-    });
-    return emptyList();
+  Handle_GetClientPickerInfo() {
+    return buildList([]);
   }
 
-  Handle_GetUserCatalogCountry(args, session) {
-    recordAuditEvent("get_user_catalog_country", args, session);
+  Handle_GetUserCatalogCountry() {
     return "US";
   }
 
   Handle_MayPetition(args, session) {
-    recordAuditEvent("may_petition_disabled", args, session, {
-      categoryID: toPositiveInteger(args && args[0], 0),
-      oocCharacterID: toPositiveInteger(args && args[1], 0),
-    });
-    return MAY_PETITION_DISABLED;
+    const characterID = getSessionCharacterID(session);
+    if (!(characterID > 0)) return -1;
+    return MAY_PETITION_ALLOWED;
   }
 
   Handle_CreatePetition(args, session, kwargs) {
-    recordAuditEvent("create_petition_rejected", args, session, {
+    const characterID = getSessionCharacterID(session);
+    const extra = kwargsToObject(kwargs);
+    const created = store.createPetition({
+      petitionerID: characterID,
       subject: toText(args && args[0], ""),
+      body: toText(args && args[1], ""),
       categoryID: toPositiveInteger(args && args[2], 0),
-      kwargs: safeClone(kwargs),
+      email: toText(extra.email, ""),
     });
-    return false;
+    if (!created.success) {
+      log.debug(`[Petitioner] CreatePetition refused ${created.reason} char=${characterID}`);
+      return false;
+    }
+    log.info(`[Petitioner] petition ${created.petitionID} created by ${characterID}`);
+    return true;
   }
 
-  Handle_GetLog(args, session) {
-    recordAuditEvent("get_log_empty", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
-    });
-    return emptyList();
+  Handle_GetLog(args) {
+    // The client renders the log from a fixed DBRowDescriptor of petition events;
+    // the durable event list is not modelled that way, so the panel stays empty
+    // instead of showing rows the client cannot read.
+    return buildList([]);
   }
 
   Handle_GetPetitionMessages(args, session) {
-    recordAuditEvent("get_petition_messages_empty", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
-    });
-    return emptyList();
+    return rowsToList(
+      store.listMessages(toPositiveInteger(args && args[0], 0), getSessionCharacterID(session)),
+    );
   }
 
   Handle_PetitionerChat(args, session) {
-    recordAuditEvent("petitioner_chat_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
-      message: toText(args && args[1], ""),
-    });
-    return null;
+    return this._appendMessage(args, session, false);
   }
 
   Handle_PetitioneeChat(args, session) {
-    recordAuditEvent("petitionee_chat_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
-      message: toText(args && args[1], ""),
-    });
+    return this._appendMessage(args, session, true);
+  }
+
+  _appendMessage(args, session, isComment) {
+    const characterID = getSessionCharacterID(session);
+    const petitionID = toPositiveInteger(args && args[0], 0);
+    const result = store.addMessage(petitionID, characterID, toText(args && args[1], ""), isComment);
+    if (!result.success) {
+      log.debug(`[Petitioner] message refused ${result.reason} petition=${petitionID}`);
+      const error = new Error(String(result.reason || "PetitionError"));
+      error.msg = String(result.reason || "PetitionError");
+      throw error;
+    }
     return null;
   }
 
-  Handle_DeletePetition(args, session) {
-    recordAuditEvent("delete_petition_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
+  Handle_DeletePetition(args) {
+    return this._update(args, (record) => {
+      if (record.deleted === true) return { refused: "ALREADY_DELETED" };
+      record.deleted = true;
+      return { log: "deleted" };
     });
-    return null;
   }
 
-  Handle_CancelPetition(args, session) {
-    recordAuditEvent("cancel_petition_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
+  Handle_CancelPetition(args) {
+    return this._update(args, (record) => {
+      if (record.closed === true) return { refused: "ALREADY_CLOSED" };
+      record.closed = true;
+      record.deleted = true;
+      return { log: "cancelled" };
     });
-    return null;
   }
 
-  Handle_ClosePetition(args, session) {
-    recordAuditEvent("close_petition_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
+  Handle_ClosePetition(args) {
+    return this._update(args, (record) => {
+      if (record.closed === true) return { refused: "ALREADY_CLOSED" };
+      record.closed = true;
+      return { log: "closed" };
     });
-    return null;
   }
 
   Handle_UnClaimPetition(args, session) {
-    recordAuditEvent("unclaim_petition_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
+    const characterID = getSessionCharacterID(session);
+    return this._update(args, (record) => {
+      if (record.claimedBy !== characterID) return { refused: "NOT_CLAIMER" };
+      record.claimedBy = 0;
+      return { log: "unclaimed" };
     });
-    return null;
   }
 
-  Handle_EscalatePetition(args, session) {
-    recordAuditEvent("escalate_petition_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
-      escalatesTo: toPositiveInteger(args && args[1], 0),
+  Handle_EscalatePetition(args) {
+    const escalatesTo = toPositiveInteger(args && args[1], 0);
+    if (!(escalatesTo > 0)) return null;
+    return this._update(args, (record) => {
+      record.escalatesTo = escalatesTo;
+      return { log: "escalated" };
     });
-    return null;
   }
 
   Handle_ClaimPetition(args, session) {
-    recordAuditEvent("claim_petition_rejected", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
+    const characterID = getSessionCharacterID(session);
+    if (!(characterID > 0)) return 0;
+    const result = this._update(args, (record) => {
+      if (record.closed === true) return { refused: "PETITION_CLOSED" };
+      if (record.claimedBy > 0 && record.claimedBy !== characterID) return { refused: "ALREADY_CLAIMED" };
+      record.claimedBy = characterID;
+      return { log: "claimed" };
     });
-    return 0;
+    return result.success ? characterID : 0;
   }
 
   Handle_AddPetitionRating(args, session) {
-    recordAuditEvent("add_petition_rating_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
-    });
-    return null;
+    return this._rate(args, session);
   }
 
   Handle_UpdatePetitionRating(args, session) {
-    recordAuditEvent("update_petition_rating_ack", args, session, {
-      petitionID: toPositiveInteger(args && args[0], 0),
+    return this._rate(args, session);
+  }
+
+  _rate(args, session) {
+    const petitionID = toPositiveInteger(args && args[0], 0);
+    const characterID = getSessionCharacterID(session);
+    const result = store.ratePetition(petitionID, characterID, {
+      responseTime: toPositiveInteger(args && args[1], 0),
+      helpfulness: toPositiveInteger(args && args[2], 0),
+      attitude: toPositiveInteger(args && args[3], 0),
+      comment: toText(args && args[4], ""),
     });
+    if (!result.success) log.debug(`[Petitioner] rating refused ${result.reason} petition=${petitionID}`);
     return null;
+  }
+
+  _update(args, mutate) {
+    const petitionID = toPositiveInteger(args && args[0], 0);
+    const result = store.updatePetition(petitionID, mutate);
+    if (!result.success) log.debug(`[Petitioner] update refused ${result.reason} petition=${petitionID}`);
+    return result;
   }
 }
 
@@ -301,11 +290,5 @@ module.exports = PetitionerService;
 module.exports._testing = {
   HELP_CENTER_URL,
   SUBMIT_REQUEST_URL,
-  MAY_PETITION_DISABLED,
-  getAuditEvents() {
-    return auditEvents.map((event) => JSON.parse(JSON.stringify(event)));
-  },
-  resetForTests() {
-    auditEvents.length = 0;
-  },
+  MAY_PETITION_ALLOWED,
 };
