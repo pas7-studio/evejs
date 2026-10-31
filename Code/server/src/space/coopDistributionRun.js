@@ -917,8 +917,15 @@ async function tick(haulerID, authorities = {}, env = process.env) {
       } catch (_error) { unloaded = null; }
       const moved = unloaded && Array.isArray(unloaded.stowed)
         ? unloaded.stowed.filter((row) => row.status === "STOWED") : [];
-      if (moved.length) note(observe, "living-distribution-run", state,
-        { reason: "UNLOADED:" + moved.map((row) => row.typeID).join(",") });
+      if (moved.length) {
+        // The hangar really grew, so the cached shortfall is now wrong: clear it before the
+        // next plan can buy the same material again.
+        if (typeof authorities.refreshFactorySupply === "function") {
+          try { authorities.refreshFactorySupply(); } catch (_error) { /* cache only */ }
+        }
+        note(observe, "living-distribution-run", state,
+          { reason: "UNLOADED:" + moved.map((row) => row.typeID).join(",") });
+      }
       else if (unloaded && unloaded.status && unloaded.status !== "NOTHING_TO_STOW")
         note(observe, "living-distribution-stow", state,
           { reason: String(unloaded.status).slice(0, 60), stationID: pos(state.returnStationID) });

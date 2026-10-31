@@ -141,6 +141,11 @@ function distributionRunAuthorities(options = {}) {
         return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 0;
       } catch (_error) { return 0; }
     };
+    // A delivery makes the cached shortfall wrong the moment it lands: the hangar grew while
+    // the answer was still cached, so without this the next plan would buy the same shortfall
+    // a second time. Measured 2026-10-31: the cache lives 120 s and a whole unload/replan cycle
+    // fits inside it.
+    const refreshFactorySupply = () => { supplyCache.clear(); return true; };
     // The one input worth BUYING. The refinery here only ever turns Veldspar into Tritanium
     // (measured `refined 17471 -> 1 mineral`), so a Tritanium shortfall is mining's job -
     // importing it would pay the Jita ask to undo the corporation's own ore. Pyerite, Mexallon
@@ -439,6 +444,8 @@ function distributionRunAuthorities(options = {}) {
           return {status: "BUY_THREW", reason: String(error && error.message || error).slice(0, 80)};
         }
       },
+      // Called by the run after a delivery really reached the hangar.
+      refreshFactorySupply,
       stow: ({haulerID, stationID, categoryID, types}) => {
         try {
           return require("./coopNpcCargoStow").createCargoStow({
