@@ -34,7 +34,13 @@ function campaignReadiness({ state, ships, minPerSide = 1 } = {}) {
     const onSide = (factionID, systemID) => rows.filter((row) =>
       row && row.campaignID === campaign.campaignID &&
       num(row.factionID) === num(factionID) && num(row.systemID) === num(systemID));
-    const attacker = onSide(war.attackerFactionID, campaign.sourceSystemID);
+    // FW-131 (measured 2026-10-31T14:59Z): a campaign only became an ASSAULT when the
+    // attacker had a hull in its SOURCE system, but the garrison musters both sides in
+    // the TARGET system - so every new front waited for a staging hull that never came,
+    // expired after the stall, and the war never fought. A real hull of the attacking
+    // faction inside the campaign target is a stronger muster than one waiting at home.
+    const attacker = [...onSide(war.attackerFactionID, campaign.sourceSystemID),
+      ...onSide(war.attackerFactionID, campaign.targetSystemID)];
     const defender = onSide(war.defenderFactionID, campaign.targetSystemID);
     const base = {
       campaignID: campaign.campaignID,
