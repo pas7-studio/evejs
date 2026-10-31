@@ -278,6 +278,19 @@ async function tick(haulerID, authorities = {}, env = process.env) {
             ? Number(authorities.stockStationFor({haulerID: id})) || 0 : 0;
         } catch (_error) { stationID = 0; }
         if (stationID && typeof authorities.buyBlueprint === "function") {
+          // The trader only trades through a hull that is AT the station (measured 2026-10-31:
+          // TOO_FAR_FROM_STATION). Fly there first, buy on the beat that arrives.
+          const gap = typeof authorities.distanceTo === "function"
+            ? authorities.distanceTo(stationID, buzzSystemID(), id) : null;
+          if (Number.isFinite(gap) && gap > STATION_RANGE_M) {
+            let flying = false;
+            try { flying = typeof authorities.goTo === "function" &&
+              authorities.goTo(stationID, id) === true; } catch (_error) { flying = false; }
+            const moving = write({ ...state, updatedAt: now, buyStationID: stationID,
+              lastReason: flying ? "FLYING_TO_BUY_BLUEPRINT" : "BUY_STATION_UNREACHABLE" }, env);
+            note(observe, "living-distribution-run", moving, { reason: moving.lastReason });
+            return { status: flying ? "BUY_FLIGHT" : "BUY_UNREACHABLE", state: moving };
+          }
           if (state) write({ ...state, blueprintTried: true, updatedAt: now }, env);
           let bought = null;
           try {
@@ -355,6 +368,9 @@ async function tick(haulerID, authorities = {}, env = process.env) {
     : [{ stationID: state.fromStationID, items: [] }];
   const stopIndex = Math.min(Math.max(0, num(state.stopIndex)), stops.length - 1);
   const stop = stops[stopIndex] || { stationID: state.fromStationID, items: [] };
+  const buzzSystemID = () => (typeof authorities.hullSystemOf === "function"
+    ? Number(authorities.hullSystemOf(id)) || 0
+    : Number(state && state.hullSystemID) || 0);
   const facts = {
     distanceToOriginM: typeof authorities.distanceTo === "function"
       ? authorities.distanceTo(stop.stationID, state.fromSystemID, id) : null,

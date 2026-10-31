@@ -401,6 +401,41 @@ function distributionRunAuthorities(options = {}) {
             budget: Number(process.env.EVEJS_COOP_BLUEPRINT_BUDGET || 5000000),
             priceCap: Number(process.env.EVEJS_COOP_BLUEPRINT_PRICE_CAP || 500000)});
           if (chosen.status !== "BUY") return chosen;
+          // The market pays for a purchase from the PILOT's earned balance, not from the
+          // corporation's treasury: measured 2026-10-31 the trader refused
+          // INSUFFICIENT_EARNED_ISK for a 42 500 ISK blueprint on a fresh identity. Give the
+          // hull a pilot that has actually earned the money, using the same link mechanism the
+          // sale uses.
+          try {
+            const ledgerFile = require("path").join(process.env.EVEJS_COOP_NPC_MARKET_ROOT ||
+              "/var/lib/evejs/coop-native-market", "ledger.json");
+            const pilots = (JSON.parse(require("fs").readFileSync(ledgerFile, "utf8")) || {}).pilots || {};
+            const registry = require("./coopIdentityRegistry").createRegistry({
+              file: env.EVEJS_COOP_IDENTITY_FILE || "/var/lib/evejs/coop-npc-links.json",
+              exists: (system, id) => {
+                try {
+                  const scene = sceneFor(system);
+                  const ship = scene && scene.getEntityByID ? scene.getEntityByID(id) : null;
+                  return Boolean(ship && ship.kind === "ship");
+                } catch (_error) { return false; }
+              },
+            });
+            const links = (registry.snapshot() || {}).links || {};
+            const bound = Object.entries(links)
+              .find(([, row]) => Number(row && row.entityID) === Number(haulerID));
+            const boundBalance = bound ? Number((pilots[bound[0]] || {}).balance || 0) : 0;
+            const price = Number(chosen.blueprint.price) || 0;
+            if (boundBalance < price) {
+              const richer = Object.entries(pilots)
+                .filter(([id, row]) => Number(row && row.balance) >= price && !links[id])
+                .sort((a, b) => Number(b[1].balance) - Number(a[1].balance))[0];
+              if (richer) {
+                if (bound) registry.release(bound[0], {expectedEntityID: Number(haulerID)});
+                registry.link({id: richer[0], name: richer[0], faction: "independent",
+                  role: "hauler", durable: false}, systemID, haulerID);
+              }
+            }
+          } catch (_error) { /* the purchase reports its own refusal */ }
           const owner = require("./coopVirtualWorldRuntime");
           const bought = typeof owner.buyFromStationStock === "function"
             ? await owner.buyFromStationStock({systemID, stationID, typeID: chosen.blueprint.typeID,
