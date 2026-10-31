@@ -39,6 +39,17 @@ function isTrivialRecipe({materialValue, productValue, minRatio = DEFAULT_MIN_IN
   if (!(productValue > 0)) return false;
   return materialValue / productValue < minRatio;
 }
+// The opposite of a trivial recipe: one that COSTS more than the product pays. Measured
+// 2026-10-31: Miner I needed 481 Pyerite + 119 Mexallon, worth 12 739 ISK at the regional
+// bids, while the only real bid for the product was 6 028 - every completed job burned
+// 7 467 ISK of the corporation's own money. A material nobody in this region bids for is
+// valued at zero on purpose: the Tritanium of our own refinery has no buyer here, so turning
+// it into something that does have one is profit, not a loss.
+function losesMoney({materialValue, productValue} = {}) {
+  if (!(materialValue > 0)) return false;
+  if (!(productValue > 0)) return false;
+  return productValue < materialValue;
+}
 function withTimeout(promise, ms) {
   if (!(ms > 0)) return promise;
   return Promise.race([promise,
@@ -340,6 +351,15 @@ async function runOnce(options = {}) {
       } catch (_error) { /* no neighbour is no buyer */ }
     }
     const productValue = bid && bid.price > 0 ? plan.productPerRun * bid.price : 0;
+    // A job that cannot pay for its own inputs is not production, it is spending.
+    if (losesMoney({materialValue, productValue})) {
+      candidates.push({stationID: blueprint.stationID,
+        blueprintTypeID: blueprint.blueprintTypeID, recipeRejected: true,
+        reason: "NO_MARGIN",
+        detail: "product " + Math.round(productValue) + " vs inputs " +
+          Math.round(materialValue)});
+      continue;
+    }
     if (isTrivialRecipe({materialValue, productValue, minRatio})) {
       candidates.push({stationID: blueprint.stationID,
         blueprintTypeID: blueprint.blueprintTypeID, recipeRejected: true,
@@ -472,5 +492,5 @@ async function regionalValue({region, typeID, call, cache, timeoutMs}) {
   return value;
 }
 
-module.exports = {FLAG, CORP_FLAG, DEFAULT_CORP_ID, THROTTLE_MS, choose, isTrivialRecipe,
+module.exports = {FLAG, CORP_FLAG, DEFAULT_CORP_ID, THROTTLE_MS, choose, isTrivialRecipe, losesMoney,
   seededBlueprints, hangarHeld, productCoverage, bestSeededBid, runOnce, tick, resetForTests};

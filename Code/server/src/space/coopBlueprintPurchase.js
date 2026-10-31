@@ -25,7 +25,8 @@ const DEFAULT_BUDGET = 50000000;
  * @param {number} input.maxOwned stop buying once this many extra blueprints were bought
  */
 function choose({asks = [], owned = [], demand = {}, productOf = {}, budget = DEFAULT_BUDGET,
-  priceCap = DEFAULT_PRICE_CAP, alreadyBought = 0, maxOwned = 3, runsAtStation = {}} = {}) {
+  priceCap = DEFAULT_PRICE_CAP, alreadyBought = 0, maxOwned = 3, runsAtStation = {},
+  unitCostOf = {}} = {}) {
   const have = new Set((Array.isArray(owned) ? owned : []).map(pos).filter(Boolean));
   const refusals = [];
   if (num(alreadyBought) >= num(maxOwned)) {
@@ -55,11 +56,29 @@ function choose({asks = [], owned = [], demand = {}, productOf = {}, budget = DE
     // A blueprint is only worth buying where the corporation can actually BUILD with it: the
     // recipe needs its materials at the same station (measured 2026-10-31: 2.8 M Tritanium sat
     // at 60000682 while the chipset blueprint was at 60014935 with zero there).
+    // What one unit of the product costs to BUILD here, at the prices the world really quotes
+    // for its materials. Measured 2026-10-31: the Miner I recipes were accepted because a bid
+    // existed, while every unit spent 12 739 ISK of inputs to earn a 6 028 ISK bid.
+    const unitCost = num(unitCostOf[typeID] !== undefined ? unitCostOf[typeID]
+      : unitCostOf[String(typeID)]);
+    if (unitCost > 0 && sellPrice <= unitCost) {
+      refusals.push({typeID, productTypeID, reason: "NO_MARGIN", unitCost, sellPrice});
+      continue;
+    }
     const runsHere = num(runsAtStation[typeID] || runsAtStation[String(typeID)] || 0);
+    // What the corporation can really earn: only the units it can build AND the buyer absorbs,
+    // each earning its own margin over the materials it eats.
+    const buildable = Math.max(0, Math.min(runsHere > 0 ? runsHere : volume, volume));
+    const profit = (sellPrice - unitCost) * buildable;
+    if (!(profit > 0)) {
+      refusals.push({typeID, productTypeID, reason: "NO_PROFIT", unitCost, sellPrice, buildable});
+      continue;
+    }
     candidates.push({typeID, stationID, price, quantity,
       name: String((ask && ask.name) || typeID), productTypeID, demandVolume: volume,
-      demandPrice: sellPrice, potential: Math.round(volume * sellPrice), runsHere,
-      value: Math.round((volume * sellPrice) / Math.max(1, price) * 100) / 100});
+      demandPrice: sellPrice, unitCost, buildable, profit: Math.round(profit),
+      potential: Math.round(volume * sellPrice), runsHere,
+      value: Math.round(profit / Math.max(1, price) * 100) / 100});
   }
   if (!candidates.length) return {status: "NO_BLUEPRINT_WORTH_BUYING", blueprint: null, refusals};
   // Buildable-here first, then the best value: a cheap blueprint nobody can feed is a purchase

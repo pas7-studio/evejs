@@ -608,6 +608,9 @@ function distributionRunAuthorities(options = {}) {
           // Can it be BUILT here? A blueprint is useless at a station that holds none of its
           // materials (measured: 2.8 M Tritanium at 60000682, chipset blueprint at 60014935).
           const runsAtStation = {};
+          // The factory is where the materials sit, not the station the hull happens to shop
+          // at: a blueprint bought in Jita is worthless there and profitable at home.
+          const buildStation = factoryStation() || Number(stationID);
           for (const typeID of Object.keys(productOf)) {
             let plan = null;
             try { plan = manufacture.recipe(Number(typeID), 1); } catch (_error) { plan = null; }
@@ -615,7 +618,7 @@ function distributionRunAuthorities(options = {}) {
             let runs = Infinity;
             for (const material of plan.materials || []) {
               const held = rows.filter((row) => Number(row.typeID) === Number(material.typeID) &&
-                Number(row.locationID) === Number(stationID))
+                Number(row.locationID) === Number(buildStation))
                 .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
               runs = Math.min(runs, Math.floor(held / Math.max(1, Number(material.quantity))));
             }
@@ -646,8 +649,24 @@ function distributionRunAuthorities(options = {}) {
               price: Math.max(current.price, Number(row.price) || 0)};
           }
           db.close();
+          // What each recipe eats, at the prices this region really pays for those materials:
+          // a material nobody bids for here costs nothing to consume, which is exactly why the
+          // corporation's own Tritanium is free to turn into something that does have a buyer.
+          const unitCostOf = {};
+          for (const typeID of Object.keys(productOf)) {
+            let plan = null;
+            try { plan = manufacture.recipe(Number(typeID), 1); } catch (_error) { plan = null; }
+            if (!plan || plan.status !== "READY") continue;
+            let cost = 0;
+            for (const material of plan.materials || []) {
+              const quote = demand[Number(material.typeID)] || demand[String(material.typeID)];
+              cost += Number(material.quantity) * Number((quote && quote.price) || 0);
+            }
+            unitCostOf[Number(typeID)] =
+              cost / Math.max(1, Number(plan.productPerRun) || 1);
+          }
           const chosen = require("./coopBlueprintPurchase").choose({asks, owned, demand, productOf,
-            runsAtStation,
+            runsAtStation, unitCostOf,
             budget: Number(process.env.EVEJS_COOP_BLUEPRINT_BUDGET || 5000000),
             priceCap: Number(process.env.EVEJS_COOP_BLUEPRINT_PRICE_CAP || 500000)});
           if (chosen.status !== "BUY") return chosen;
