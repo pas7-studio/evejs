@@ -13,6 +13,7 @@ const path = require("node:path");
 const protobuf = require("protobufjs");
 const {
   getActiveCharacterID,
+  uuidStringToBuffer,
 } = require("./gatewayServiceHelpers");
 
 const LISTING_API = "eve_public.cosmetic.market.component.listing.api";
@@ -286,7 +287,7 @@ function createComponentListingGatewayService(context = {}) {
       }
       return ok("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse",
         types.purchaseResponse, {
-          transaction: { uuid: Buffer.from(String(result.transactionID || ""), "utf8").subarray(0, 16) },
+          transaction: { uuid: uuidStringToBuffer(result.transactionUUID) },
           immediately_activate: result.immediatelyActivate === true,
         });
     },

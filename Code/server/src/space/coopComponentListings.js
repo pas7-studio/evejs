@@ -16,6 +16,7 @@
 // The price rule and the stock rule are pure, so they are testable without a store.
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const STATE_FILE = "coop-component-listings.json";
 const HANGAR_FLAG = 4;
@@ -241,6 +242,10 @@ function createComponentListings({
         stationID, remaining: listing.remaining });
     return {
       status: "SOLD",
+      // A real UUID, not a description. The client decodes this with
+      // `uuid.UUID(bytes=response.transaction.uuid)`, which raises unless it is exactly 16
+      // bytes, and then keeps it as the purchase's transaction id.
+      transactionUUID: crypto.randomUUID(),
       transactionID: `${key}:${id}:${units}:${costISK}`,
       typeID: listing.typeID,
       units,
